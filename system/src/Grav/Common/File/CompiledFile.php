@@ -3,7 +3,7 @@
 /**
  * @package    Grav\Common\File
  *
- * @copyright  Copyright (c) 2015 - 2025 Trilby Media, LLC. All rights reserved.
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
  * @license    MIT License; see LICENSE file for details.
  */
 
@@ -31,7 +31,7 @@ trait CompiledFile
      * @param mixed $var
      * @return array
      */
-    public function content($var = null)
+    public function content(mixed $var = null)
     {
         try {
             $filename = $this->filename;
@@ -39,20 +39,55 @@ trait CompiledFile
             if ($var === null && $this->raw === null && $this->content === null) {
                 $key = md5($filename);
                 $file = PhpFile::instance(CACHE_DIR . "compiled/files/{$key}{$this->extension}.php");
+                $cacheFilename = $file->filename();
 
+                // Always check file modification time for cache invalidation.
+                // This respects Grav's cache.check.method setting and user expectations.
+                // filemtime() is cheap and ensures changes are detected.
                 $modified = $this->modified();
-                if (!$modified) {
-                    try {
-                        return $this->decode($this->raw());
-                    } catch (Throwable $e) {
-                        // If the compiled file is broken, we can safely ignore the error and continue.
-                    }
-                }
 
                 $class = get_class($this);
 
+                // Fast path: include the compiled file directly (served from opcache when
+                // enabled) and use it as long as it still matches the source file.
+                if ($modified && is_file($cacheFilename)) {
+                    try {
+                        $cache = (array)include $cacheFilename;
+
+                        if (($cache['@class'] ?? null) === $class
+                            && ($cache['modified'] ?? null) === $modified
+                            && ($cache['filename'] ?? null) === $filename
+                            && ($cache['size'] ?? null) === filesize($filename)
+                            && isset($cache['data'])
+                        ) {
+                            $this->content = $cache['data'];
+
+                            return parent::content($var);
+                        }
+                    } catch (Throwable $e) {
+                        // If the compiled file is broken, we can safely ignore the error and continue.
+                        $this->logCorruptCache($cacheFilename, $filename, $e);
+                    }
+                }
+
+                // Check if the source file exists before getting its size
+                if (!is_file($filename)) {
+                    return parent::content($var);
+                }
+
                 $size = filesize($filename);
-                $cache = $file->exists() ? $file->content() : null;
+                try {
+                    $cache = $file->exists() ? $file->content() : null;
+                } catch (Throwable $e) {
+                    // A corrupt or partially written compiled cache file (e.g. from a
+                    // concurrent regeneration race) can throw while being read/included —
+                    // including ParseError, which is an Error and would otherwise escape
+                    // this method's outer `catch (Exception)` as a fatal. Treat it as a
+                    // cache miss and regenerate from the raw source below, mirroring the
+                    // fast-path `catch (Throwable)` above.
+                    $cache = null;
+                    $this->logCorruptCache($cacheFilename, $filename, $e);
+                }
 
                 // Load real file if cache isn't up to date (or is invalid).
                 if (!isset($cache['@class'])
@@ -89,11 +124,9 @@ trait CompiledFile
 
                         // Compile cached file into bytecode cache
                         if (function_exists('opcache_invalidate') && filter_var(ini_get('opcache.enable'), \FILTER_VALIDATE_BOOLEAN)) {
-                            $lockName = $file->filename();
-
                             // Silence error if function exists, but is restricted.
-                            @opcache_invalidate($lockName, true);
-                            @opcache_compile_file($lockName);
+                            @opcache_invalidate($cacheFilename, true);
+                            @opcache_compile_file($cacheFilename);
                         }
                     }
                 }
@@ -115,7 +148,7 @@ trait CompiledFile
      * @return void
      * @throws RuntimeException
      */
-    public function save($data = null)
+    public function save(mixed $data = null)
     {
         // Make sure that the cache file is always up to date!
         $key = md5($this->filename);
@@ -159,10 +192,10 @@ trait CompiledFile
 
             // Compile cached file into bytecode cache
             if (function_exists('opcache_invalidate') && filter_var(ini_get('opcache.enable'), \FILTER_VALIDATE_BOOLEAN)) {
-                $lockName = $file->filename();
+                $cacheFilename = $file->filename();
                 // Silence error if function exists, but is restricted.
-                @opcache_invalidate($lockName, true);
-                @opcache_compile_file($lockName);
+                @opcache_invalidate($cacheFilename, true);
+                @opcache_compile_file($cacheFilename);
             }
         }
     }
@@ -174,11 +207,13 @@ trait CompiledFile
      */
     public function __sleep()
     {
+        // Intentionally omit 'raw' and 'content' so a serialized
+        // CompiledFile (e.g. stored inside the session user) does not
+        // freeze a stale snapshot of the file's data across requests.
+        // The compiled cache on disk + opcache make re-reading cheap.
         return [
             'filename',
             'extension',
-            'raw',
-            'content',
             'settings'
         ];
     }
@@ -188,8 +223,48 @@ trait CompiledFile
      */
     public function __wakeup()
     {
+        // Drop any data fields carried over from an older session blob.
+        // The current __sleep no longer serializes raw/content, but
+        // existing sessions written by older code can still restore
+        // stale data here and would otherwise short-circuit the cache
+        // re-read in content(), making admin permission changes invisible
+        // until the session is destroyed.
+        $this->raw = null;
+        $this->content = null;
+
         if (!isset(static::$instances[$this->filename])) {
             static::$instances[$this->filename] = $this;
+        }
+    }
+
+    /**
+     * Record that a compiled cache file could not be read and is being regenerated.
+     *
+     * Regenerating silently is the correct behaviour, but doing it without a trace
+     * makes a *recurring* corruption problem invisible to an operator — the compiled
+     * file is valid again by the time anyone looks at it. The logger is resolved
+     * defensively and the whole call is guarded, so logging a degraded cache can
+     * never itself become the fatal we are recovering from.
+     *
+     * @param string $cacheFilename Compiled file that could not be read.
+     * @param string $filename      Source file it was compiled from.
+     * @param Throwable $e          Failure encountered while reading it.
+     */
+    private function logCorruptCache(string $cacheFilename, string $filename, Throwable $e): void
+    {
+        try {
+            $log = Grav::instance()['log'] ?? null;
+            if ($log) {
+                $log->warning(sprintf(
+                    '%s(): Corrupt compiled cache %s for %s (%s); regenerating from source.',
+                    __METHOD__,
+                    $cacheFilename,
+                    $filename,
+                    $e->getMessage()
+                ));
+            }
+        } catch (Throwable) {
+            // Logging is best-effort: never let it mask the recovery it is reporting.
         }
     }
 }

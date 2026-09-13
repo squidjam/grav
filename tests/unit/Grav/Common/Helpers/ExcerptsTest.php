@@ -7,13 +7,14 @@ use Grav\Common\Page\Interfaces\PageInterface;
 use Grav\Common\Uri;
 use Grav\Common\Config\Config;
 use Grav\Common\Page\Pages;
+use Grav\Common\Page\Media;
 use Grav\Common\Language\Language;
 use RocketTheme\Toolbox\ResourceLocator\UniformResourceLocator;
 
 /**
  * Class ExcerptsTest
  */
-class ExcerptsTest extends \Codeception\TestCase\Test
+class ExcerptsTest extends \PHPUnit\Framework\TestCase
 {
     /** @var Parsedown $parsedown */
     protected $parsedown;
@@ -38,8 +39,9 @@ class ExcerptsTest extends \Codeception\TestCase\Test
 
     protected $old_home;
 
-    protected function _before(): void
+    protected function setUp(): void
     {
+        parent::setUp();
         $grav = Fixtures::get('grav');
         $this->grav = $grav();
         $this->pages = $this->grav['pages'];
@@ -70,7 +72,7 @@ class ExcerptsTest extends \Codeception\TestCase\Test
         $this->uri->initializeWithURL('http://testing.dev/item2/item2-2')->init();
     }
 
-    protected function _after(): void
+    protected function tearDown(): void
     {
         $this->config->set('system.home.alias', $this->old_home);
     }
@@ -78,11 +80,11 @@ class ExcerptsTest extends \Codeception\TestCase\Test
 
     public function testProcessImageHtml(): void
     {
-        self::assertRegexp(
+        self::assertMatchesRegularExpression(
             '|<img alt="Sample Image" src="\/images\/.*-sample-image.jpe?g\" data-src="sample-image\.jpg\?cropZoom=300,300" \/>|',
             Excerpts::processImageHtml('<img src="sample-image.jpg?cropZoom=300,300" alt="Sample Image" />', $this->page)
         );
-        self::assertRegexp(
+        self::assertMatchesRegularExpression(
             '|<img alt="Sample Image" class="foo" src="\/images\/.*-sample-image.jpe?g\" data-src="sample-image\.jpg\?classes=foo" \/>|',
             Excerpts::processImageHtml('<img src="sample-image.jpg?classes=foo" alt="Sample Image" />', $this->page)
         );
@@ -116,5 +118,336 @@ class ExcerptsTest extends \Codeception\TestCase\Test
             '<a href="https://meet.weikamp.biz/Support" rel="nofollow" target="_blank"',
             Excerpts::processLinkHtml('<a href="https://meet.weikamp.biz/Support?rel=nofollow&target=_blank">target and rel</a>')
         );
+    }
+
+    public function testImageFilenameWithColonIsResolvedAsLocalMedia(): void
+    {
+        // getgrav/grav#3933: a bare relative filename containing a literal ':'
+        // (e.g. a timestamp) must still resolve to the page's own media, not be
+        // misread by parse_url() as a scheme:path split.
+        //
+        // The fixture is generated here at runtime rather than committed to
+        // git: ':' is a reserved character on NTFS, so a statically committed
+        // file with this name would make `git clone`/checkout of the whole
+        // repo fail on Windows. Page media loads lazily on first access, so
+        // it's enough for the file to exist before processImageHtml() runs.
+        if (DIRECTORY_SEPARATOR === '\\') {
+            self::markTestSkipped('A colon is not a legal filename character on Windows.');
+        }
+
+        $fixturePath = GRAV_ROOT . '/tests/fake/nested-site/user/pages/02.item2/02.item2-2/2025-06-29T13:36:56.png';
+        $image = imagecreatetruecolor(10, 10);
+        imagepng($image, $fixturePath);
+        imagedestroy($image);
+
+        // The page's media collection was already built (by Pages::init())
+        // before this fixture existed on disk, so force a fresh scan of the
+        // folder now that the file is there.
+        $this->page->media(new Media($this->page->getMediaFolder(), $this->page->getMediaOrder()));
+
+        try {
+            self::assertMatchesRegularExpression(
+                '|<img alt="Timestamped" src="\/images\/.*-2025-06-29t133656\.png" data-src="2025-06-29T13:36:56\.png\?cropZoom=300,300" \/>|',
+                Excerpts::processImageHtml('<img src="2025-06-29T13:36:56.png?cropZoom=300,300" alt="Timestamped" />', $this->page)
+            );
+        } finally {
+            @unlink($fixturePath);
+        }
+    }
+
+    public function testMailtoAndTelLinksAreNotBrokenByColonFix(): void
+    {
+        // Non-regression: any scheme without "://" that still has valid,
+        // letter-led URI scheme grammar (RFC 3986) must pass through
+        // untouched, whether or not Grav has special-case handling for it.
+        self::assertStringStartsWith(
+            '<a href="mailto:bob@example.com"',
+            Excerpts::processLinkHtml('<a href="mailto:bob@example.com">email</a>')
+        );
+        self::assertStringStartsWith(
+            '<a href="tel:+123456789"',
+            Excerpts::processLinkHtml('<a href="tel:+123456789">call</a>')
+        );
+        self::assertStringStartsWith(
+            '<a href="xmpp:xyx@domain.com"',
+            Excerpts::processLinkHtml('<a href="xmpp:xyx@domain.com">xmpp</a>')
+        );
+    }
+
+    public function testStreamImageIsNotBrokenByColonFix(): void
+    {
+        // Non-regression: registered Grav streams (image://, user://, ...) must
+        // keep resolving via the locator exactly as before.
+        self::assertStringStartsWith(
+            '<img alt="Stream" src="/system/images/watermark.png"',
+            Excerpts::processImageHtml('<img src="image://watermark.png" alt="Stream" />', $this->page)
+        );
+    }
+
+    /**
+     * @dataProvider letterLedColonFilenameProvider
+     */
+    public function testLetterLedColonFilenameIsTreatedAsLocalMedia(string $filename): void
+    {
+        // RFC 3986 scheme grammar alone cannot separate "note:2025.png" from an
+        // unknown protocol - both are a letter-led token plus a colon - so these
+        // are recognised by carrying a media extension instead. Without that the
+        // fix would only cover colon filenames whose leading token happens to
+        // start with a digit (getgrav/grav#3933).
+        $result = Excerpts::processImageHtml('<img src="' . $filename . '" alt="Colon" />', $this->page);
+
+        // Resolved against the page's own route rather than passed through as a
+        // scheme, which is what happened before: the src was left verbatim.
+        self::assertStringContainsString('src="/item2/item2-2/' . $filename . '"', $result);
+    }
+
+    public function letterLedColonFilenameProvider(): array
+    {
+        return [
+            'word prefix' => ['note:2025.png'],
+            'uppercase prefix' => ['IMG:001.png'],
+            'multiple colons' => ['a:b:c.png'],
+            'no separator' => ['Screenshot2025at13:36:56.png'],
+        ];
+    }
+
+    public function testImageDefaultsAreNotAppliedToNonImageMedia(): void
+    {
+        // getgrav/grav#4264: `system.images.defaults` is image configuration, so
+        // none of it may reach audio, video or a document. `link` replaced the
+        // audio player with a linked thumbnail, and loading/decoding/fetchpriority
+        // fell through the medium's __call() URL passthrough and were appended to
+        // the querystring. The `link` default is what makes the querystring
+        // visible here at all, since the rendered <audio> element hides its
+        // <source> child from this helper.
+        $this->config->set('system.images.defaults', [
+            'loading' => 'lazy',
+            'decoding' => 'async',
+            'fetchpriority' => 'high',
+            'link' => true,
+        ]);
+
+        // Generated at runtime so the repo carries no binary media fixture; the
+        // file only has to exist before the media folder is rescanned below.
+        $fixturePath = GRAV_ROOT . '/tests/fake/nested-site/user/pages/02.item2/02.item2-2/sample-audio.mp3';
+        file_put_contents($fixturePath, '');
+
+        $this->page->media(new Media($this->page->getMediaFolder(), $this->page->getMediaOrder()));
+
+        try {
+            $result = Excerpts::processImageHtml('<img src="sample-audio.mp3" alt="Sample Audio" />', $this->page);
+
+            self::assertStringStartsWith('<audio', $result, 'the audio player must survive `link: true`');
+            self::assertStringNotContainsString('<a ', $result);
+            self::assertStringNotContainsString('loading=', $result);
+            self::assertStringNotContainsString('decoding=', $result);
+            self::assertStringNotContainsString('fetchpriority=', $result);
+        } finally {
+            @unlink($fixturePath);
+        }
+    }
+
+    public function testImageDefaultsAreNotAppliedToImagesThatCannotTakeThem(): void
+    {
+        // An SVG is image media, but it is served as-is: StaticImageMedium has
+        // loading() and no decoding()/fetchpriority(). Those two must not be
+        // pushed onto its URL either, so a plain ImageMediaInterface check is
+        // not enough on its own.
+        $this->config->set('system.images.defaults', [
+            'loading' => 'lazy',
+            'decoding' => 'async',
+            'fetchpriority' => 'high',
+        ]);
+
+        $fixturePath = GRAV_ROOT . '/tests/fake/nested-site/user/pages/02.item2/02.item2-2/sample-vector.svg';
+        file_put_contents($fixturePath, '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"></svg>');
+
+        $this->page->media(new Media($this->page->getMediaFolder(), $this->page->getMediaOrder()));
+
+        try {
+            $result = Excerpts::processImageHtml('<img src="sample-vector.svg" alt="Sample Vector" />', $this->page);
+
+            self::assertStringContainsString('loading="lazy"', $result);
+            self::assertStringNotContainsString('sample-vector.svg?', $result);
+            self::assertStringNotContainsString('decoding=', $result);
+            self::assertStringNotContainsString('fetchpriority=', $result);
+        } finally {
+            @unlink($fixturePath);
+        }
+    }
+
+    public function testImageDefaultsAreStillAppliedToRealImages(): void
+    {
+        // Non-regression: normal images must keep receiving the configured
+        // image defaults.
+        $this->config->set('system.images.defaults', [
+            'loading' => 'lazy',
+            'decoding' => 'async',
+            'fetchpriority' => 'high',
+        ]);
+
+        self::assertStringStartsWith(
+            '<img loading="lazy" decoding="async" fetchpriority="high"',
+            Excerpts::processImageHtml('<img src="sample-image.jpg" alt="Sample Image" />', $this->page)
+        );
+    }
+
+    public function testMediaExtensionArmDoesNotCaptureRealSchemes(): void
+    {
+        // The media-extension check must never reinterpret a genuine protocol as
+        // a local file, however the reference happens to end. Grav's own external
+        // scheme list plus data: are excluded outright.
+        foreach (['mailto:someone@example.com', 'tel:+123456789', 'git:example.com/repo.png'] as $href) {
+            self::assertStringStartsWith(
+                '<a href="' . $href . '"',
+                Excerpts::processLinkHtml('<a href="' . $href . '">link</a>'),
+                $href . ' must pass through untouched'
+            );
+        }
+    }
+
+    /**
+     * getgrav/grav#4298: with `pages.media_route_urls` on, a Markdown image that
+     * serves its original file must link it through the page route, or the
+     * `user/pages` deny rule turns it into a 403.
+     */
+    public function testMarkdownImageUsesRouteUrlWhenMediaRouteUrlsIsOn(): void
+    {
+        // The leading space keeps these from matching the `data-src` attribute,
+        // which echoes the path as written.
+        $this->withMediaRouteUrls(function () {
+            self::assertStringContainsString(
+                ' src="/item2/item2-2/sample-image.jpg"',
+                Excerpts::processImageHtml('<img src="sample-image.jpg" alt="Sample Image" />', $this->page)
+            );
+        });
+    }
+
+    public function testUntouchedImageKeepsRouteUrlAfterTheSameImageWasResized(): void
+    {
+        $this->withMediaRouteUrls(function () {
+            self::assertMatchesRegularExpression(
+                '| src="/images/.*-sample-image\.jpe?g"|',
+                Excerpts::processImageHtml('<img src="sample-image.jpg?cropZoom=300,300" alt="Sample Image" />', $this->page)
+            );
+            self::assertStringContainsString(
+                ' src="/item2/item2-2/sample-image.jpg"',
+                Excerpts::processImageHtml('<img src="sample-image.jpg?classes=foo" alt="Sample Image" />', $this->page)
+            );
+        });
+    }
+
+    public function testLightboxImageUsesRouteUrl(): void
+    {
+        $this->withMediaRouteUrls(function () {
+            $html = Excerpts::processImageHtml('<img src="sample-image.jpg?lightbox" alt="Sample Image" />', $this->page);
+
+            self::assertStringContainsString('rel="lightbox"', $html);
+            self::assertStringContainsString(' src="/item2/item2-2/sample-image.jpg"', $html);
+            self::assertStringNotContainsString('nested-site', $html);
+        });
+    }
+
+    public function testImageFromAnotherPageUsesThatPagesRouteUrl(): void
+    {
+        // An image default is only applied once the file is found among the
+        // other page's media, so it proves the src below came from that medium
+        // and was not just passed through unresolved.
+        $this->config->set('system.images.defaults', ['loading' => 'lazy']);
+
+        try {
+            $this->withMediaRouteUrls(function () {
+                $html = Excerpts::processImageHtml('<img src="/item2/item2-2/sample-image.jpg" alt="Sample Image" />', $this->pages->find('/item2/item2-3'));
+
+                self::assertStringContainsString('loading="lazy"', $html);
+                self::assertStringContainsString(' src="/item2/item2-2/sample-image.jpg"', $html);
+            });
+        } finally {
+            $this->config->set('system.images.defaults', []);
+        }
+    }
+
+    public function testAutoSizesMeasuresTheOriginalWhenItIsRouted(): void
+    {
+        $this->config->set('system.images.cls.auto_sizes', true);
+
+        try {
+            $this->withMediaRouteUrls(function () {
+                $medium = $this->page->media()['sample-image.jpg'];
+                [$width, $height] = getimagesize($medium->get('filepath'));
+                // auto_sizes is read from config on reset.
+                $medium->reset();
+
+                $html = Excerpts::processImageHtml('<img src="sample-image.jpg" alt="Sample Image" />', $this->page);
+
+                self::assertStringContainsString(' src="/item2/item2-2/sample-image.jpg"', $html);
+                self::assertStringContainsString('width="' . $width . '" height="' . $height . '"', $html);
+            });
+        } finally {
+            $this->config->set('system.images.cls.auto_sizes', false);
+            $this->page->getMedia()['sample-image.jpg']->reset();
+        }
+    }
+
+    /**
+     * `url(true, true)` must give the same scheme, host and base path as
+     * `page.url(true)`, whether the file is linked through its page route or by
+     * its path on disk, in a subfolder install and with `custom_base_url` set.
+     *
+     * @dataProvider mediaHostProvider
+     */
+    public function testMediaUrlWithHostMirrorsPageUrlWithHost(string $custom_base, string $root_path, string $url, string $expected_host, string $expected_root): void
+    {
+        $current_base = $this->config->get('system.custom_base_url');
+        $this->config->set('system.custom_base_url', $custom_base);
+
+        try {
+            $this->uri->initializeWithUrlAndRootPath($url, $root_path)->init();
+            $page_url = $this->page->url(true);
+            self::assertSame($expected_root . '/item2/item2-2', $page_url);
+
+            $this->withMediaRouteUrls(function () use ($page_url) {
+                self::assertSame($page_url . '/sample-image.jpg', $this->page->media()['sample-image.jpg']->url(true, true));
+                self::assertSame($page_url . '/existing-file.zip', $this->page->media()['existing-file.zip']->url(true, true));
+            });
+
+            // Linked by its path on disk, the host goes in front of what url() gives.
+            foreach (['sample-image.jpg', 'existing-file.zip'] as $filename) {
+                $relative = $this->page->media()[$filename]->url();
+                self::assertStringStartsWith('/', $relative);
+                self::assertSame($expected_host . $relative, $this->page->media()[$filename]->url(true, true));
+            }
+        } finally {
+            $this->config->set('system.custom_base_url', $current_base);
+            $this->uri->initializeWithURL('http://testing.dev/item2/item2-2')->init();
+        }
+    }
+
+    public static function mediaHostProvider(): array
+    {
+        return [
+            'root install' => ['', '', 'https://example.com/item2/item2-2', 'https://example.com', 'https://example.com'],
+            'subfolder' => ['', '/sub', 'https://example.com/sub/item2/item2-2', 'https://example.com', 'https://example.com/sub'],
+            'relative custom base' => ['/act', '', 'https://example.com/act/item2/item2-2', 'https://example.com', 'https://example.com/act'],
+            'full custom base' => ['https://public.example.org/act', '', 'https://example.com/act/item2/item2-2', 'https://public.example.org', 'https://public.example.org/act'],
+        ];
+    }
+
+    private function withMediaRouteUrls(callable $test): void
+    {
+        $this->config->set('system.pages.media_route_urls', true);
+
+        try {
+            $test();
+        } finally {
+            $this->config->set('system.pages.media_route_urls', false);
+
+            // The route URL is stamped on the media objects, which outlive the test.
+            foreach (['/item2/item2-2', '/item2/item2-3'] as $route) {
+                foreach ($this->pages->find($route)->getMedia()->all() as $medium) {
+                    $medium->set('url', null);
+                }
+            }
+        }
     }
 }

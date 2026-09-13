@@ -1,4 +1,4 @@
-<?php
+<?php declare(strict_types = 1);
 
 namespace PHPStan\Toolbox;
 
@@ -46,6 +46,6 @@ class UniformResourceLocatorExtension implements DynamicMethodReturnTypeExtensio
             return new StringType();
         }
 
-        return ParametersAcceptorSelector::selectSingle($methodReflection->getVariants())->getReturnType();
+        return ParametersAcceptorSelector::selectFromArgs($scope, $methodCall->getArgs(), $methodReflection->getVariants())->getReturnType();
     }
 }

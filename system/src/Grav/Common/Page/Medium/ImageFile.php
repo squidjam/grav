@@ -3,7 +3,7 @@
 /**
  * @package    Grav\Common\Page
  *
- * @copyright  Copyright (c) 2015 - 2025 Trilby Media, LLC. All rights reserved.
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
  * @license    MIT License; see LICENSE file for details.
  */
 
@@ -31,6 +31,29 @@ use function in_array;
  */
 class ImageFile extends Image
 {
+    /**
+     * Image constructor with adapter configuration from Grav.
+     *
+     * @param string|null $originalFile
+     * @param int|null $width
+     * @param int|null $height
+     */
+    public function __construct($originalFile = null, $width = null, $height = null)
+    {
+        parent::__construct($originalFile, $width, $height);
+        
+        // Set the adapter based on Grav configuration
+        $grav = Grav::instance();
+        $adapter = $grav['config']->get('system.images.adapter', 'gd');
+        try {
+            $this->setAdapter($adapter);
+        } catch (Exception) {
+            $grav['log']->error(
+                'Image adapter "' . $adapter . '" is not available. Falling back to GD adapter.'
+            );
+        }
+    }
+
     /**
      * Destruct also image object.
      */
@@ -95,9 +118,7 @@ class ImageFile extends Image
 
         // Target file should be younger than all the current image
         // dependencies
-        $conditions = array(
-            'younger-than' => $this->getDependencies()
-        );
+        $conditions = ['younger-than' => $this->getDependencies()];
 
         // The generating function
         $generate = function ($target) use ($image, $type, $quality) {
@@ -112,8 +133,8 @@ class ImageFile extends Image
 
         // Asking the cache for the cacheFile
         try {
-            $perms = $config->get('system.images.cache_perms', '0755');
-            $perms = octdec($perms);
+            $perms = $config->get('system.images.cache_perms', '0775');
+            $perms = octdec((string) $perms);
             $file = $this->getCacheSystem()->setDirectoryMode($perms)->getOrCreateFile($cacheFile, $conditions, $generate, $actual);
         } catch (GenerationError $e) {
             $file = $e->getNewFile();

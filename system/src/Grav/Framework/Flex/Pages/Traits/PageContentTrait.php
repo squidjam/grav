@@ -3,7 +3,7 @@
 /**
  * @package    Grav\Framework\Flex
  *
- * @copyright  Copyright (c) 2015 - 2025 Trilby Media, LLC. All rights reserved.
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
  * @license    MIT License; see LICENSE file for details.
  */
 
@@ -14,10 +14,12 @@ use Grav\Common\Config\Config;
 use Grav\Common\Grav;
 use Grav\Common\Markdown\Parsedown;
 use Grav\Common\Markdown\ParsedownExtra;
+use Grav\Common\Media\MediaRouteUrls;
 use Grav\Common\Page\Header;
 use Grav\Common\Page\Interfaces\PageInterface;
 use Grav\Common\Page\Markdown\Excerpts;
 use Grav\Common\Page\Media;
+use Grav\Common\Security;
 use Grav\Common\Twig\Twig;
 use Grav\Common\Utils;
 use Grav\Framework\File\Formatter\YamlFormatter;
@@ -191,7 +193,15 @@ trait PageContentTrait
             $this->setProperty('media', $var);
         }
 
-        return $this->getProperty('media');
+        $media = $this->getProperty('media');
+
+        // Applied here rather than where the collection is built because the
+        // route depends on the active language and base route. See Page::media().
+        if ($this instanceof PageInterface) {
+            MediaRouteUrls::apply($this, $media);
+        }
+
+        return $media;
     }
 
     /**
@@ -202,9 +212,7 @@ trait PageContentTrait
         return $this->loadHeaderProperty(
             'title',
             $var,
-            function ($value) {
-                return trim($value ?? ($this->root() ? '<root>' : ucfirst($this->slug())));
-            }
+            fn($value) => trim((string) ($value ?? ($this->root() ? '<root>' : ucfirst($this->slug()))))
         );
     }
 
@@ -216,9 +224,7 @@ trait PageContentTrait
         return $this->loadHeaderProperty(
             'menu',
             $var,
-            function ($value) {
-                return trim($value ?: $this->title());
-            }
+            fn($value) => trim((string) ($value ?: $this->title()))
         );
     }
 
@@ -230,9 +236,11 @@ trait PageContentTrait
         $value = $this->loadHeaderProperty(
             'visible',
             $var,
-            function ($value) {
-                return ($value ?? $this->order() !== false) && !$this->isModule();
-            }
+            // An empty string (e.g. an untouched toggleable `visible` field
+            // saved by admin) is not a meaningful boolean — coerce it to null
+            // so the folder-order auto-detection still runs instead of forcing
+            // the page out of navigation. See getgrav/grav#4153.
+            fn($value) => ((($value ?? '') === '' ? null : $value) ?? $this->order() !== false) && !$this->isModule()
         );
 
         return $value && $this->published();
@@ -246,9 +254,7 @@ trait PageContentTrait
         return $this->loadHeaderProperty(
             'published',
             $var,
-            static function ($value) {
-                return (bool)($value ?? true);
-            }
+            static fn($value) => (bool)($value ?? true)
         );
     }
 
@@ -260,9 +266,7 @@ trait PageContentTrait
         return $this->loadHeaderProperty(
             'publish_date',
             $var,
-            function ($value) {
-                return $value ? Utils::date2timestamp($value, $this->getProperty('dateformat')) : null;
-            }
+            fn($value) => $value ? Utils::date2timestamp($value, $this->getProperty('dateformat')) : null
         );
     }
 
@@ -274,9 +278,7 @@ trait PageContentTrait
         return $this->loadHeaderProperty(
             'unpublish_date',
             $var,
-            function ($value) {
-                return $value ? Utils::date2timestamp($value, $this->getProperty('dateformat')) : null;
-            }
+            fn($value) => $value ? Utils::date2timestamp($value, $this->getProperty('dateformat')) : null
         );
     }
 
@@ -289,7 +291,10 @@ trait PageContentTrait
             'process',
             $var,
             function ($value) {
-                $value = array_replace(Grav::instance()['config']->get('system.pages.process', []), is_array($value) ? $value : []);
+                $defaults = Security::applyProcessDefaults(
+                    (array) Grav::instance()['config']->get('system.pages.process', [])
+                );
+                $value = array_replace($defaults, is_array($value) ? $value : []);
                 foreach ($value as $process => $status) {
                     $value[$process] = (bool)$status;
                 }
@@ -356,7 +361,15 @@ trait PageContentTrait
             }
         );
 
-        return $property !== false ? sprintf('%02d.', $property) : false;
+        if ($property === false) {
+            return false;
+        }
+
+        // Preserve the original prefix width from the current folder so saves
+        // do not normalize "005." → "05." across a load/edit/save round trip.
+        $digits = \Grav\Common\Page\PageOrdering::digitsFromFolder($this->folder());
+
+        return \Grav\Common\Page\PageOrdering::prefix($property, $digits);
     }
 
     /**
@@ -405,9 +418,7 @@ trait PageContentTrait
         return $this->loadHeaderProperty(
             'last_modified',
             $var,
-            static function ($value) {
-                return (bool)($value ?? Grav::instance()['config']->get('system.pages.last_modified'));
-            }
+            static fn($value) => (bool)($value ?? Grav::instance()['config']->get('system.pages.last_modified'))
         );
     }
 
@@ -435,9 +446,7 @@ trait PageContentTrait
         return $this->loadHeaderProperty(
             'dateformat',
             $var,
-            static function ($value) {
-                return $value;
-            }
+            static fn($value) => $value
         );
     }
 
@@ -568,7 +577,7 @@ trait PageContentTrait
             case 'folder':
                 $folder = $this->folder();
 
-                return null !== $folder ? preg_replace(static::PAGE_ORDER_PREFIX_REGEX, '', $folder) : '';
+                return null !== $folder ? preg_replace(static::PAGE_ORDER_PREFIX_REGEX, '', (string) $folder) : '';
             case 'slug':
                 return $this->slug();
             case 'published':
@@ -610,9 +619,9 @@ trait PageContentTrait
 
         $content = $this->_summary ?? $this->content();
         if ($textOnly) {
-            $content =  strip_tags($content);
+            $content =  strip_tags((string) $content);
         }
-        $content_size = mb_strwidth($content, 'utf-8');
+        $content_size = mb_strwidth((string) $content, 'utf-8');
         $summary_size = $this->_summary !== null ? $content_size : $this->getProperty('summary_size');
 
         // Return calculated summary based on summary divider's position.
@@ -626,14 +635,14 @@ trait PageContentTrait
         if ($format === 'short' && null !== $summary_size) {
             // Slice the string on breakpoint.
             if ($content_size > $summary_size) {
-                return mb_substr($content, 0, $summary_size);
+                return mb_substr((string) $content, 0, $summary_size);
             }
 
             return $content;
         }
 
         // If needed, get summary size from the config.
-        $size = $size ?? $config['size'] ?? null;
+        $size ??= $config['size'] ?? null;
 
         // Return calculated summary based on defaults.
         $size = is_numeric($size) ? (int)$size : -1;
@@ -648,7 +657,7 @@ trait PageContentTrait
 
         // Only return string but not html, wrap whatever html tag you want when using.
         if ($textOnly) {
-            return mb_strimwidth($content, 0, $size, '...', 'UTF-8');
+            return mb_strimwidth((string) $content, 0, $size, '...', 'UTF-8');
         }
 
         $summary = Utils::truncateHTML($content, $size);
@@ -672,15 +681,51 @@ trait PageContentTrait
         $config = $grav['config'];
 
         $process_markdown = $this->shouldProcess('markdown');
-        $process_twig = $this->shouldProcess('twig') || $this->isModule();
+
+        // security.twig_content.process_enabled gates editor-authored Twig
+        // in page content. isModule() is theme-controlled (modular templates
+        // render their own children with Twig) and stays unconditionally
+        // enabled. See system/config/security.yaml.
+        $content_twig_requested = $this->shouldProcess('twig');
+        $content_twig_allowed = (bool) $config->get('security.twig_content.process_enabled', false);
+        // Only log when the gate actually stops a render; modular pages
+        // bypass the gate so they're not blocked and shouldn't appear in
+        // the gate-blocked audit log.
+        if ($content_twig_requested && !$content_twig_allowed && !$this->isModule()) {
+            Security::logTwigContentGateBlocked((string) ($this->route() ?? $this->filePath() ?? 'unknown'), 'content');
+        }
+        // Editor-authored content Twig is gated by process_enabled; trusted
+        // modular/theme Twig renders unconditionally. XSS in assembled content
+        // Twig is caught at save time (Security::detectXssInEditorContent), not
+        // here. Shares the boolean with that guard so the two cannot drift
+        // apart. Mirrors Page::content(). (GHSA-2c4f-86xc-cr74, GHSA-fg8g-663r-f366)
+        $process_twig = Security::willProcessContentTwig($this);
+
         $cache_enable = $this->getNestedProperty('header.cache_enable') ?? $config->get('system.cache.enabled', true);
 
         $twig_first = $this->getNestedProperty('header.twig_first') ?? $config->get('system.pages.twig_first', false);
         $never_cache_twig = $this->getNestedProperty('header.never_cache_twig') ?? $config->get('system.pages.never_cache_twig', false);
 
-        if ($cache_enable) {
+        // Editor-authored content Twig is request-aware even inside the sandbox, and
+        // the render cache below is keyed on the page key and the config checksum
+        // only, with no session or request dimension. Cache the markdown, re-run the
+        // Twig every request. Mirrors Page::content(). (GHSA-pp89-h475-7gj6)
+        if ($process_twig && !$this->isModule()) {
+            $never_cache_twig = true;
+        }
+
+        // Twig-first content that is never cached has no Twig-free stage to read
+        // back either: the Twig output is what Markdown parses.
+        $twig_first_uncached = $twig_first && $process_twig && $never_cache_twig;
+
+        if ($cache_enable && !$twig_first_uncached) {
             $cache = $this->getCache('render');
-            $key = md5($this->getCacheKey() . '-content');
+            // Mix the full config checksum into the cache id so any change
+            // to system, site, security, or plugin config (including the
+            // security.twig_content gates) evicts previously rendered output.
+            // Matches the invalidation strategy classic Page uses in
+            // getPageContentCacheKey().
+            $key = md5($this->getCacheKey() . '-content:cfg=' . (string) $config->checksum());
             $cached = $cache->get($key);
             if ($cached && $cached['checksum'] === $this->getCacheChecksum()) {
                 $this->_content = $cached['content'] ?? '';
@@ -720,7 +765,7 @@ trait PageContentTrait
             $this->_content = $content;
             $grav->fireEvent('onPageContentRaw', new Event(['page' => $this]));
 
-            if ($twig_first && !$never_cache_twig) {
+            if ($twig_first) {
                 if ($process_twig) {
                     $this->_content = $this->processTwig($this->_content);
                 }
@@ -819,7 +864,7 @@ trait PageContentTrait
             // Base64 encode any twig.
             $content = preg_replace_callback(
                 ['/({#.*?#})/mu', '/({{.*?}})/mu', '/({%.*?%})/mu'],
-                static function ($matches) use ($token) { return $token[0] . base64_encode($matches[1]) . $token[1]; },
+                static fn($matches) => $token[0] . base64_encode((string) $matches[1]) . $token[1],
                 $content
             );
         }
@@ -830,8 +875,8 @@ trait PageContentTrait
             // Base64 decode the encoded twig.
             $content = preg_replace_callback(
                 ['`' . $token[0] . '([A-Za-z0-9+/]+={0,2})' . $token[1] . '`mu'],
-                static function ($matches) { return base64_decode($matches[1]); },
-                $content
+                static fn($matches) => base64_decode((string) $matches[1]),
+                (string) $content
             );
         }
 

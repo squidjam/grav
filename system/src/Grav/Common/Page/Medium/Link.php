@@ -3,7 +3,7 @@
 /**
  * @package    Grav\Common\Page
  *
- * @copyright  Copyright (c) 2015 - 2025 Trilby Media, LLC. All rights reserved.
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
  * @license    MIT License; see LICENSE file for details.
  */
 
@@ -40,9 +40,18 @@ class Link implements RenderableInterface, MediaLinkInterface
     {
         $this->attributes = $attributes;
 
+        // Attributes set on the medium before it was linked (loading, decoding,
+        // class, id, ...) describe the image, not the anchor, so carry them over the
+        // reset below and onto the image we wrap. getgrav/grav#4282.
+        $inherited = $medium->getAttributes();
+
         $source = $medium->reset()->thumbnail('auto')->display('thumbnail');
         if (!$source instanceof MediaObjectInterface) {
             throw new RuntimeException('Media has no thumbnail set');
+        }
+
+        foreach ($inherited as $name => $value) {
+            $source->attribute($name, $value);
         }
 
         $source->set('linked', true);
@@ -76,16 +85,15 @@ class Link implements RenderableInterface, MediaLinkInterface
      * Forward the call to the source element
      *
      * @param string $method
-     * @param mixed $args
      * @return mixed
      */
     #[\ReturnTypeWillChange]
-    public function __call($method, $args)
+    public function __call($method, mixed $args)
     {
         $object = $this->source;
         $callable = [$object, $method];
         if (!is_callable($callable)) {
-            throw new BadMethodCallException(get_class($object) . '::' . $method . '() not found.');
+            throw new BadMethodCallException($object::class . '::' . $method . '() not found.');
         }
 
         $object = call_user_func_array($callable, $args);

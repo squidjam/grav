@@ -9,7 +9,7 @@ use Grav\Common\Utils;
 /**
  * Class UriTest
  */
-class UriTest extends \Codeception\TestCase\Test
+class UriTest extends \PHPUnit\Framework\TestCase
 {
     /** @var Grav $grav */
     protected $grav;
@@ -858,15 +858,16 @@ class UriTest extends \Codeception\TestCase\Test
         ],
     ];
 
-    protected function _before(): void
+    protected function setUp(): void
     {
+        parent::setUp();
         $grav = Fixtures::get('grav');
         $this->grav = $grav();
         $this->uri = $this->grav['uri'];
         $this->config = $this->grav['config'];
     }
 
-    protected function _after(): void
+    protected function tearDown(): void
     {
     }
 
@@ -901,7 +902,7 @@ class UriTest extends \Codeception\TestCase\Test
             self::assertSame($expected, $result, "Test \$url->{$method}() for {$url}");
             // Deal with $url->query($key)
             if ($method === 'query') {
-                parse_str($expected, $queryParams);
+                parse_str((string) $expected, $queryParams);
                 foreach ($queryParams as $key => $value) {
                     self::assertSame($value, $this->uri->{$method}($key), "Test \$url->{$method}('{$key}') for {$url}");
                 }
@@ -1089,10 +1090,78 @@ class UriTest extends \Codeception\TestCase\Test
         self::assertSame('/foo/bar', $this->uri->referrer());
     }
 
+    public function testReferrerOnlyAcceptsOurOwnOrigin(): void
+    {
+        $previous = $_SERVER['HTTP_REFERER'] ?? null;
+        $this->uri->initializeWithURL('http://localhost/foo/page:test')->init();
+
+        try {
+            // Our own origin is accepted, with or without a path.
+            $_SERVER['HTTP_REFERER'] = 'http://localhost/some/page';
+            self::assertSame('/some/page', $this->uri->referrer('/default'));
+            $_SERVER['HTTP_REFERER'] = 'http://localhost';
+            self::assertSame('', $this->uri->referrer('/default'));
+
+            // A host that merely starts with our own is not ours.
+            foreach (['http://localhost.attacker.tld/phish', 'http://localhost-attacker.tld/phish'] as $referrer) {
+                $_SERVER['HTTP_REFERER'] = $referrer;
+                self::assertSame('/default', $this->uri->referrer('/default'), $referrer);
+            }
+
+            // Unrelated origins are rejected, as are non-string referrers.
+            $_SERVER['HTTP_REFERER'] = 'http://attacker.tld/phish';
+            self::assertSame('/default', $this->uri->referrer('/default'));
+            unset($_SERVER['HTTP_REFERER']);
+            self::assertSame('/default', $this->uri->referrer('/default'));
+
+            // A `//host` path must not come back as a protocol relative URL.
+            $_SERVER['HTTP_REFERER'] = 'http://localhost//attacker.tld/phish';
+            self::assertSame('/attacker.tld/phish', $this->uri->referrer('/default'));
+        } finally {
+            if ($previous === null) {
+                unset($_SERVER['HTTP_REFERER']);
+            } else {
+                $_SERVER['HTTP_REFERER'] = $previous;
+            }
+        }
+    }
+
     public function testIp(): void
     {
         $this->uri->initializeWithURL('http://localhost/foo/page:test')->init();
         self::assertSame('UNKNOWN', Uri::ip());
+
+        // Request variables are read from $_SERVER, not only getenv(): CGI/FastCGI
+        // hosts and PHP's built-in server never export them to the environment.
+        $previous = $this->config->get('system.http_x_forwarded');
+        $previousServer = array_intersect_key($_SERVER, ['REMOTE_ADDR' => 1, 'HTTP_X_FORWARDED_FOR' => 1]);
+        $_SERVER['REMOTE_ADDR'] = '203.0.113.7';
+        $_SERVER['HTTP_X_FORWARDED_FOR'] = '198.51.100.9, 203.0.113.7';
+        try {
+            $this->config->set('system.http_x_forwarded', ['ip' => false]);
+            self::assertSame('203.0.113.7', Uri::ip(), 'forwarded headers stay ignored until opted in');
+
+            $this->config->set('system.http_x_forwarded', ['ip' => true]);
+            self::assertSame('198.51.100.9', Uri::ip(), 'opted-in forwarded header wins over REMOTE_ADDR');
+
+            unset($_SERVER['HTTP_X_FORWARDED_FOR']);
+            $_SERVER['REMOTE_ADDR'] = 'not-an-ip';
+            self::assertSame('UNKNOWN', Uri::ip(), 'an invalid address is not reported');
+
+            // An empty $_SERVER entry must not shadow a working getenv() value:
+            // behaviour has to stay identical on hosts where getenv() answers.
+            $_SERVER['REMOTE_ADDR'] = '';
+            putenv('REMOTE_ADDR=203.0.113.11');
+            try {
+                self::assertSame('203.0.113.11', Uri::ip(), 'an empty $_SERVER entry falls back to getenv()');
+            } finally {
+                putenv('REMOTE_ADDR');
+            }
+        } finally {
+            unset($_SERVER['REMOTE_ADDR'], $_SERVER['HTTP_X_FORWARDED_FOR']);
+            $_SERVER += $previousServer;
+            $this->config->set('system.http_x_forwarded', $previous);
+        }
     }
 
     public function testIsExternal(): void
@@ -1174,5 +1243,54 @@ class UriTest extends \Codeception\TestCase\Test
         ], $this->uri->toArray());
 
         $this->config->set('system.custom_base_url', $current_base);
+    }
+
+    public function testCustomBasePrefixCollision(): void
+    {
+        $current_base = $this->config->get('system.custom_base_url');
+        $this->config->set('system.custom_base_url', '/test');
+        $this->uri->initializeWithURL('https://mydomain.example.com:8090/testing/foo')->init();
+
+        $this->assertSame('/testing/foo', $this->uri->toArray()['path']);
+
+        $this->config->set('system.custom_base_url', $current_base);
+    }
+
+    /**
+     * @dataProvider customBaseBoundaryProvider
+     */
+    public function testCustomBaseBoundary(string $custom_base, string $root_path, string $url, string $path, string $query, string $route): void
+    {
+        $current_base = $this->config->get('system.custom_base_url');
+        $this->config->set('system.custom_base_url', $custom_base);
+        $this->uri->initializeWithUrlAndRootPath($url, $root_path)->init();
+
+        $this->assertSame($path, $this->uri->path());
+        $this->assertSame($query, $this->uri->query());
+        $this->assertSame($route, $this->uri->route());
+
+        $this->config->set('system.custom_base_url', $current_base);
+    }
+
+    public static function customBaseBoundaryProvider(): array
+    {
+        return [
+            // the home page with a query string stays the home page
+            'custom base home with query' => ['/act', '', 'https://example.com/act?page=2', '', 'page=2', '/'],
+            'custom base home, slash and query' => ['/act', '', 'https://example.com/act/?page=2', '/', 'page=2', '/'],
+            'full custom base home with query' => ['https://public.example.org/act', '', 'https://example.com/act?page=2', '', 'page=2', '/'],
+            'subfolder home with query' => ['', '/sub', 'https://example.com/sub?x=1', '', 'x=1', '/'],
+            'subfolder and custom base home with query' => ['/act', '/grav', 'https://example.com/grav?x=1', '', 'x=1', '/'],
+            // pages under the base lose the base
+            'custom base page' => ['/act', '', 'https://example.com/act/foo?x=1', '/foo', 'x=1', '/foo'],
+            'subfolder page' => ['', '/sub', 'https://example.com/sub/foo', '/foo', '', '/foo'],
+            // a page that only starts with the same letters keeps its name
+            'custom base prefix collision' => ['/act', '', 'https://example.com/action-bar', '/action-bar', '', '/action-bar'],
+            'custom base prefix collision with query' => ['/act', '', 'https://example.com/action-bar?x=1', '/action-bar', 'x=1', '/action-bar'],
+            'custom base with trailing slash' => ['/act/', '', 'https://example.com/action-bar', '/action-bar', '', '/action-bar'],
+            'full custom base prefix collision' => ['https://public.example.org/act', '', 'https://example.com/action-bar', '/action-bar', '', '/action-bar'],
+            // a proxy that already removed the base
+            'custom base already stripped' => ['/act', '', 'https://example.com/foo', '/foo', '', '/foo'],
+        ];
     }
 }

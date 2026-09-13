@@ -3,7 +3,7 @@
 /**
  * @package    Grav\Console\Gpm
  *
- * @copyright  Copyright (c) 2015 - 2025 Trilby Media, LLC. All rights reserved.
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
  * @license    MIT License; see LICENSE file for details.
  */
 
@@ -12,6 +12,7 @@ namespace Grav\Console\Gpm;
 use Grav\Common\GPM\GPM;
 use Grav\Common\GPM\Installer;
 use Grav\Common\GPM\Upgrader;
+use Grav\Common\Grav;
 use Grav\Console\GpmCommand;
 use Symfony\Component\Console\Input\ArrayInput;
 use Symfony\Component\Console\Input\InputArgument;
@@ -116,15 +117,30 @@ class UpdateCommand extends GpmCommand
         $local = $this->upgrader->getLocalVersion();
         $remote = $this->upgrader->getRemoteVersion();
         if ($local !== $remote) {
-            $io->writeln('<yellow>WARNING</yellow>: A new version of Grav is available. You should update Grav before updating plugins and themes. If you continue without updating Grav, some plugins or themes may stop working.');
-            $io->newLine();
-            $question = new ConfirmationQuestion('Continue with the update process? [Y|n] ', true);
-            $answer = $io->askQuestion($question);
+            // A new release family is a major upgrade (e.g., 1.7.x -> 1.8.y, or 2.x -> 3.0);
+            // from 2.0 on a minor release is an ordinary one.
+            $isMajorMinorUpgrade = Upgrader::family($local) !== Upgrader::family($remote);
 
-            if (!$answer) {
-                $io->writeln('<red>Update aborted. Exiting...</red>');
+            if ($isMajorMinorUpgrade) {
+                // For major/minor upgrades (e.g., 1.7.x -> 1.8.y), recommend updating plugins FIRST
+                $io->writeln('<yellow>WARNING</yellow>: A new major version of Grav is available (v' . $local . ' -> v' . $remote . ').');
+                $io->writeln('For major version upgrades, you should update plugins and themes to their latest compatible versions BEFORE upgrading Grav core.');
+                $io->writeln('This ensures plugins have any necessary compatibility fixes for the new Grav version.');
+                $io->newLine();
+                $io->writeln('<green>It is recommended to proceed with updating plugins and themes now.</green>');
+            } else {
+                // For patch upgrades (e.g., 1.7.45 -> 1.7.46), recommend updating Grav FIRST
+                $io->writeln('<yellow>WARNING</yellow>: A new version of Grav is available (v' . $local . ' -> v' . $remote . ').');
+                $io->writeln('You should update Grav before updating plugins and themes. If you continue without updating Grav, some plugins or themes may stop working.');
+                $io->newLine();
+                $question = new ConfirmationQuestion('Continue with the update process? [Y|n] ', true);
+                $answer = $io->askQuestion($question);
 
-                return 1;
+                if (!$answer) {
+                    $io->writeln('<red>Update aborted. Exiting...</red>');
+
+                    return 1;
+                }
             }
         }
 
@@ -187,13 +203,32 @@ class UpdateCommand extends GpmCommand
                     $package->available = $package->version;
                 }
 
+                // Build compatibility badges
+                $compat = $package->compatibility ?? null;
+                $compatStr = '';
+                if (is_array($compat) && !empty($compat['grav'])) {
+                    $badges = [];
+                    if (in_array('1.7', $compat['grav'], true)) {
+                        $badges[] = '<blue>1.7</blue>';
+                    }
+                    if (in_array('1.8', $compat['grav'], true)) {
+                        $badges[] = '<green>1.8</green>';
+                    }
+                    if (in_array('2.0', $compat['grav'], true)) {
+                        $badges[] = '<magenta>2.0</magenta>';
+                    }
+                    $compatStr = ' ' . implode(' ', $badges);
+                }
+
                 $io->writeln(
                     // index
                     str_pad((string)$index++, 2, '0', STR_PAD_LEFT) . '. ' .
                     // name
-                    '<cyan>' . str_pad($package->name, 15) . '</cyan> ' .
+                    '<cyan>' . str_pad((string) $package->name, 15) . '</cyan> ' .
                     // version
-                    "[v<magenta>{$package->version}</magenta> -> v<green>{$package->available}</green>]"
+                    "[v<magenta>{$package->version}</magenta> -> v<green>{$package->available}</green>]" .
+                    // compat badges
+                    $compatStr
                 );
                 $slugs[] = $slug;
             }

@@ -3,7 +3,7 @@
 /**
  * @package    Grav\Framework\Flex
  *
- * @copyright  Copyright (c) 2015 - 2025 Trilby Media, LLC. All rights reserved.
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
  * @license    MIT License; see LICENSE file for details.
  */
 
@@ -69,9 +69,10 @@ trait PageRoutableTrait
         $value = $this->loadHeaderProperty(
             'routable',
             $var,
-            static function ($value) {
-                return $value ?? true;
-            }
+            // Treat an empty string (untouched toggleable field) as unset so it
+            // falls back to the `true` default rather than a falsy ''. See
+            // getgrav/grav#4153.
+            static fn($value) => (($value ?? '') === '' ? null : $value) ?? true
         );
 
         return $value && $this->published() && !$this->isModule() && !$this->root() && $this->getLanguages(true);
@@ -111,13 +112,18 @@ trait PageRoutableTrait
     /**
      * Gets the url for the Page.
      *
-     * @param bool $include_host Defaults false, but true would include http://yourhost.com
+     * @param bool $include_host Defaults false, but true would include http://yourhost.com.
+     *                            Ignored when $canonical is true and routes.canonical is an
+     *                            absolute URL: that names a different origin outright, so
+     *                            there is no meaningful host-less form of it to return.
      * @param bool $canonical true to return the canonical URL
      * @param bool $include_base
      * @param bool $raw_route
+     * @param string|null $extension An output format to link to (`md`, `rss`, `json`…) instead of the
+     *                               site's `append_url_extension`. The home page becomes `/index.<ext>`.
      * @return string The url.
      */
-    public function url($include_host = false, $canonical = false, $include_base = true, $raw_route = false): string
+    public function url($include_host = false, $canonical = false, $include_base = true, $raw_route = false, $extension = null): string
     {
         // Override any URL when external_url is set
         $external = $this->getNestedProperty('header.external_url');
@@ -142,16 +148,26 @@ trait PageRoutableTrait
         }
 
         if ($canonical) {
-            $route .= $this->routeCanonical();
+            $routeCanonical = $this->routeCanonical();
+            if (is_string($routeCanonical) && Uri::isExternal($routeCanonical)) {
+                return $routeCanonical;
+            }
+
+            $route .= $routeCanonical;
         } elseif ($raw_route) {
             $route .= $this->rawRoute();
         } else {
             $route .= $this->route();
         }
 
+        $extension = is_string($extension) && $extension !== '' ? '.' . ltrim($extension, '.') : $this->urlExtension();
+        if ($extension !== '' && !$raw_route && $this->home()) {
+            $route = ($include_base ? $pages->baseRoute() : '') . '/index';
+        }
+
         /** @var Uri $uri */
         $uri = $grav['uri'];
-        $url = $uri->rootUrl($include_host) . '/' . trim($route, '/') . $this->urlExtension();
+        $url = $uri->rootUrl($include_host) . '/' . trim($route, '/') . $extension;
 
         return Uri::filterPath($url);
     }
@@ -281,7 +297,10 @@ trait PageRoutableTrait
     public function routeCanonical($var = null): ?string
     {
         if (null !== $var) {
-            $this->setNestedProperty('header.routes.canonical', (array)$var);
+            // Stored as a plain string: the blueprint declares this as `type: text`
+            // and the getter below requires a string, so the previous (array) cast
+            // meant a value set through this setter could never be read back.
+            $this->setNestedProperty('header.routes.canonical', (string)$var);
         }
 
         $canonical = $this->getNestedProperty('header.routes.canonical');
@@ -300,9 +319,7 @@ trait PageRoutableTrait
         return $this->loadHeaderProperty(
             'redirect',
             $var,
-            static function ($value) {
-                return trim($value) ?: null;
-            }
+            static fn($value) => trim((string) $value) ?: null
         );
     }
 
@@ -409,7 +426,7 @@ trait PageRoutableTrait
      * @param  PageInterface|null $var the parent page object
      * @return PageInterface|null the parent page object if it exists.
      */
-    public function parent(PageInterface $var = null)
+    public function parent(?PageInterface $var = null)
     {
         if (null !== $var) {
             // TODO:

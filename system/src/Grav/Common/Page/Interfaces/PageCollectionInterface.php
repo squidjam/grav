@@ -3,7 +3,7 @@
 /**
  * @package    Grav\Common\Page
  *
- * @copyright  Copyright (c) 2015 - 2025 Trilby Media, LLC. All rights reserved.
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
  * @license    MIT License; see LICENSE file for details.
  */
 
@@ -46,7 +46,7 @@ interface PageCollectionInterface extends Traversable, ArrayAccess, Countable, S
      * Add a single page to a collection
      *
      * @param PageInterface $page
-     * @return $this
+     * @return $this|PageCollectionInterface<TKey,T>
      */
     public function addPage(PageInterface $page);
 
@@ -63,7 +63,7 @@ interface PageCollectionInterface extends Traversable, ArrayAccess, Countable, S
      *
      * Create a copy of this collection
      *
-     * @return static
+     * @return static<TKey,T>
      */
     public function copy();
 
@@ -283,6 +283,15 @@ interface PageCollectionInterface extends Traversable, ArrayAccess, Countable, S
      * @phpstan-return PageCollectionInterface<TKey,T>
      */
     public function ofOneOfTheseTypes($types);
+
+    /**
+     * Creates new collection excluding pages of the specified type(s)
+     *
+     * @param string|string[] $type
+     * @return PageCollectionInterface The collection
+     * @phpstan-return PageCollectionInterface<TKey,T>
+     */
+    public function notOfType($type);
 
     /**
      * Creates new collection with only pages of one of the specified access levels

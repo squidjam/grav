@@ -3,7 +3,7 @@
 /**
  * @package    Grav\Common\Assets
  *
- * @copyright  Copyright (c) 2015 - 2025 Trilby Media, LLC. All rights reserved.
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
  * @license    MIT License; see LICENSE file for details.
  */
 
@@ -114,7 +114,7 @@ abstract class BaseAsset extends PropertyObject
 
         // Do some special stuff for CSS/JS (not inline)
         if (!Utils::startsWith($this->getType(), 'inline')) {
-            $this->base_url = rtrim($uri->rootUrl($config->get('system.absolute_urls')), '/') . '/';
+            $this->base_url = rtrim((string) $uri->rootUrl($config->get('system.absolute_urls')), '/') . '/';
             $this->remote = static::isRemoteLink($asset);
 
             // Move this to render?
@@ -144,6 +144,33 @@ abstract class BaseAsset extends PropertyObject
                 $asset = $this->buildLocalLink($file->getPathname());
 
                 $this->modified = $file->isFile() ? $file->getMTime() : false;
+
+                // Rewrite the cache-busting token to this asset's own filemtime
+                // instead of the global config/version-derived cache key, so
+                // editing one file invalidates only that file's URL.
+                //
+                // Only ever replaces the token the flag itself generated — the
+                // global cache key. An explicit, caller-supplied token set via the
+                // public Assets::setTimestamp() API wins outright, whether or not
+                // the config flag is on: pinning one release token across a fleet
+                // is exactly what that API is for, and a config flag should not be
+                // able to silently override an imperative call with no way out.
+                //
+                // Note: the rendered <link>/<script> tag for a *pipelined* bundle
+                // still uses the global cache key (Pipeline::$timestamp, set from
+                // Assets::render()), so this has no effect on pipelined output
+                // URLs. It does still feed into the pipeline's internal bundle
+                // uid hash (Pipeline::renderCss()/renderJs() hash the serialized
+                // BaseAsset objects, which include $timestamp) — harmless, but
+                // it does mean upgrading can produce one new bundle file instead
+                // of reusing the previous one.
+                if ($this->timestamp
+                    && $this->modified
+                    && $config->get('system.assets.enable_asset_timestamp')
+                    && $this->timestamp === Grav::instance()['cache']->getKey()
+                ) {
+                    $this->timestamp = dechex($this->modified);
+                }
             }
         }
 
@@ -188,11 +215,17 @@ abstract class BaseAsset extends PropertyObject
     public static function integrityHash($input)
     {
         $grav = Grav::instance();
+
+        // Check the (default off) SRI flag before doing any URL work; this runs
+        // for every rendered asset.
+        $assetsConfig = $grav['config']->get('system.assets');
+        if (empty($assetsConfig['enable_asset_sri'])) {
+            return '';
+        }
+
         $uri = $grav['uri'];
 
-        $assetsConfig = $grav['config']->get('system.assets');
-
-        if (!self::isRemoteLink($input) && !empty($assetsConfig['enable_asset_sri']) && $assetsConfig['enable_asset_sri']) {
+        if (!self::isRemoteLink($input)) {
             $input = preg_replace('#^' . $uri->rootUrl() . '#', '', $input);
             $asset = File::instance(GRAV_WEBROOT . $input);
 

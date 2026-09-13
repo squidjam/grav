@@ -5,7 +5,7 @@ declare(strict_types=1);
 /**
  * @package    Grav\Common\Flex
  *
- * @copyright  Copyright (c) 2015 - 2025 Trilby Media, LLC. All rights reserved.
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
  * @license    MIT License; see LICENSE file for details.
  */
 
@@ -37,7 +37,6 @@ use Grav\Framework\File\Formatter\YamlFormatter;
 use Grav\Framework\Filesystem\Filesystem;
 use Grav\Framework\Flex\Flex;
 use Grav\Framework\Flex\FlexDirectory;
-use Grav\Framework\Flex\Storage\FileStorage;
 use Grav\Framework\Flex\Traits\FlexMediaTrait;
 use Grav\Framework\Flex\Traits\FlexRelationshipsTrait;
 use Grav\Framework\Form\FormFlashFile;
@@ -92,9 +91,9 @@ class UserObject extends FlexObject implements UserInterface, Countable
     protected $_uploads_original;
     /** @var FileInterface|null */
     protected $_storage;
-    /** @var UserGroupIndex */
+    /** @var UserGroupIndex|null */
     protected $_groups;
-    /** @var Access */
+    /** @var Access|null */
     protected $_access;
     /** @var array|null */
     protected $access;
@@ -270,10 +269,19 @@ class UserObject extends FlexObject implements UserInterface, Countable
      * @param  string|null $scope
      * @return bool|null
      */
-    public function authorize(string $action, string $scope = null): ?bool
+    public function authorize(string $action, ?string $scope = null): ?bool
     {
         if ($scope === 'test') {
-            // Special scope to test user permissions.
+            // Special scope to test the permissions of a user who may not be the
+            // active session user. Account state still applies -- that is a fact
+            // about the account -- but the session facts below (authenticated, 2FA)
+            // do not, because pre-login ACL checks depend on this scope answering
+            // for a user who has not logged in yet. The default keeps a hand-written
+            // account file with no `state:` key from losing every permission.
+            if ($this->getProperty('state', 'enabled') !== 'enabled') {
+                return false;
+            }
+
             $scope = null;
         } else {
             // User needs to be enabled.
@@ -286,8 +294,10 @@ class UserObject extends FlexObject implements UserInterface, Countable
                 return false;
             }
 
-            if (strpos($action, 'login') === false && !$this->getProperty('authorized')) {
-                // User needs to be authorized (2FA).
+            // User needs to be authorized (2FA), unless this is a login action itself.
+            // Matched exactly: a substring test also exempted any operator-chosen
+            // permission whose name merely contained "login".
+            if (!in_array($action, static::LOGIN_ACTIONS, true) && !$this->getProperty('authorized')) {
                 return false;
             }
 
@@ -350,6 +360,22 @@ class UserObject extends FlexObject implements UserInterface, Countable
     }
 
     /**
+     * {@inheritdoc}
+     * Override to filter out sensitive fields like password hashes
+     */
+    public function jsonSerialize(): array
+    {
+        $elements = parent::jsonSerialize();
+
+        // Security: Remove sensitive fields that should never be exposed to frontend
+        unset($elements['hashed_password']);
+        unset($elements['secret']);  // 2FA secret
+        unset($elements['twofa_secret']);  // Alternative 2FA field name
+
+        return $elements;
+    }
+
+    /**
      * Convert object into an array.
      *
      * @return array
@@ -401,7 +427,7 @@ class UserObject extends FlexObject implements UserInterface, Countable
      */
     public function join($name, $value, $separator = null)
     {
-        $separator = $separator ?? '.';
+        $separator ??= '.';
         $old = $this->get($name, null, $separator);
         if ($old !== null) {
             if (!is_array($old)) {
@@ -557,7 +583,7 @@ class UserObject extends FlexObject implements UserInterface, Countable
      * @param FileInterface|null $storage Optionally enter a new storage.
      * @return FileInterface|null
      */
-    public function file(FileInterface $storage = null)
+    public function file(?FileInterface $storage = null)
     {
         if (null !== $storage) {
             $this->_storage = $storage;
@@ -583,11 +609,24 @@ class UserObject extends FlexObject implements UserInterface, Countable
     {
         // TODO: We may want to handle this in the storage layer in the future.
         $key = $this->getStorageKey();
-        if (!$key || strpos($key, '@@')) {
+        // `@@` is Flex's marker for an in-memory (not-yet-persisted) storage key.
+        // `str_contains` is the correct predicate here — `strpos` returns 0 when
+        // the marker is at position 0 (e.g. `@@hash`), which is falsy and would
+        // have skipped the uniqueness check below.
+        $isNewUser = $key === '' || str_contains($key, '@@');
+
+        if ($isNewUser) {
+            $newKey = $this->getKey();
+
+            // Prevent overwriting an existing account when a low-privileged user
+            // creates a new user with an already-taken username (GHSA-rr73-568v-28f8).
+            // Applies to every storage implementation, not just FileStorage.
             $storage = $this->getFlexDirectory()->getStorage();
-            if ($storage instanceof FileStorage) {
-                $this->setStorageKey($this->getKey());
+            if ($storage->hasKey($newKey)) {
+                throw new RuntimeException('User account with this username already exists');
             }
+
+            $this->setStorageKey($newKey);
         }
 
         $password = $this->getProperty('password') ?? $this->getProperty('password1');
@@ -791,7 +830,13 @@ class UserObject extends FlexObject implements UserInterface, Countable
             }
         }
 
-        if ($user instanceof self && $user->getStorageKey() === $this->getStorageKey()) {
+        // Both keys have to be non-empty. FlexObject::getStorageKey() returns '' for
+        // any object that has never been persisted, and the anonymous guest Grav
+        // hands a session-less visitor is itself created with an empty key -- so a
+        // bare comparison made a guest the "owner" of any not-yet-created account.
+        // (GHSA-hp5c-hmwq-qjv6)
+        $key = $this->getStorageKey();
+        if ($key !== '' && $user instanceof self && $user->getStorageKey() === $key) {
             // User cannot delete his own account, otherwise he has full access.
             return $action !== 'delete';
         }
@@ -966,6 +1011,12 @@ class UserObject extends FlexObject implements UserInterface, Countable
     }
 
     /**
+     * Override doSerialize to preserve sensitive fields during PHP serialization (caching).
+     *
+     * Note: jsonSerialize() and toArray() strip sensitive fields for frontend security,
+     * but we need to preserve them when serializing for cache storage to ensure
+     * password hashes and 2FA secrets are not lost.
+     *
      * @return array
      */
     protected function doSerialize(): array
@@ -973,7 +1024,7 @@ class UserObject extends FlexObject implements UserInterface, Countable
         return [
             'type' => $this->getFlexType(),
             'key' => $this->getKey(),
-            'elements' => $this->jsonSerialize(),
+            'elements' => $this->getElements(),
             'storage' => $this->getMetaData()
         ];
     }
@@ -1027,10 +1078,9 @@ class UserObject extends FlexObject implements UserInterface, Countable
     }
 
     /**
-     * @param mixed $value
      * @return array
      */
-    protected function offsetLoad_access($value): array
+    protected function offsetLoad_access(mixed $value): array
     {
         if (!$value instanceof Access) {
             $value = new Access($value);
@@ -1040,10 +1090,9 @@ class UserObject extends FlexObject implements UserInterface, Countable
     }
 
     /**
-     * @param mixed $value
      * @return array
      */
-    protected function offsetPrepare_access($value): array
+    protected function offsetPrepare_access(mixed $value): array
     {
         return $this->offsetLoad_access($value);
     }

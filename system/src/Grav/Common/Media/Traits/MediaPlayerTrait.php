@@ -3,7 +3,7 @@
 /**
  * @package    Grav\Common\Media
  *
- * @copyright  Copyright (c) 2015 - 2025 Trilby Media, LLC. All rights reserved.
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
  * @license    MIT License; see LICENSE file for details.
  */
 
@@ -101,6 +101,29 @@ trait MediaPlayerTrait
         }
 
         return $this;
+    }
+
+    /**
+     * Normalize attributes for HTML audio and video elements.
+     *
+     * The generic media pipeline always provides an alt attribute, but alt is
+     * not valid on audio or video. Preserve non-empty alternative text as an
+     * accessible name unless the caller already provided one explicitly.
+     *
+     * @param array $attributes
+     * @return array
+     */
+    protected function normalizePlayerAttributes(array $attributes)
+    {
+        if (isset($attributes['alt'])) {
+            if ($attributes['alt'] !== '' && empty($attributes['aria-label'])) {
+                $attributes['aria-label'] = $attributes['alt'];
+            }
+
+            unset($attributes['alt']);
+        }
+
+        return $attributes;
     }
 
     /**

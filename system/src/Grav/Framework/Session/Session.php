@@ -3,7 +3,7 @@
 /**
  * @package    Grav\Framework\Session
  *
- * @copyright  Copyright (c) 2015 - 2025 Trilby Media, LLC. All rights reserved.
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
  * @license    MIT License; see LICENSE file for details.
  */
 
@@ -31,6 +31,8 @@ class Session implements SessionInterface
     protected $options = [];
     /** @var bool */
     protected $started = false;
+    /** @var bool Lock released after a read-only start; the first write re-acquires it. */
+    protected $readonly = false;
 
     /** @var Session */
     protected static $instance;
@@ -198,15 +200,12 @@ class Session implements SessionInterface
         $sessionExists = isset($_COOKIE[$sessionName]);
 
         // Protection against invalid session cookie names throwing exception: http://php.net/manual/en/function.session-id.php#116836
-        if ($sessionExists && !preg_match('/^[-,a-zA-Z0-9]{1,128}$/', $_COOKIE[$sessionName])) {
+        if ($sessionExists && !preg_match('/^[-,a-zA-Z0-9]{1,128}$/', (string) $_COOKIE[$sessionName])) {
             unset($_COOKIE[$sessionName]);
             $sessionExists = false;
         }
 
         $options = $this->options;
-        if ($readonly) {
-            $options['read_and_close'] = '1';
-        }
 
         try {
             $success = @session_start($options);
@@ -260,7 +259,7 @@ class Session implements SessionInterface
             if ($user && (!$user instanceof UserInterface || (method_exists($user, 'isValid') && !$user->isValid()))) {
                 throw new RuntimeException('Bad user');
             }
-        } catch (Throwable $e) {
+        } catch (Throwable) {
             $this->invalidate();
             throw new SessionException('Invalid User object, session destroyed.', 500);
         }
@@ -271,7 +270,71 @@ class Session implements SessionInterface
             $this->setCookie();
         }
 
+        // Read-only start: now that the data has been read, validated and the
+        // cookie refreshed, release the exclusive session lock immediately. The
+        // session stays readable ($_SESSION is kept after close) and the first
+        // write re-acquires the lock via reopen(). This lets requests that share
+        // a session id (e.g. an SPA's parallel API calls, multi-tab browsing,
+        // concurrent AJAX) read concurrently instead of serializing on PHP's
+        // per-session file lock. Opt-in via system.session.read_and_close.
+        if ($readonly && \PHP_SESSION_ACTIVE === session_status()) {
+            session_write_close();
+            $this->readonly = true;
+        }
+
         return $this;
+    }
+
+    /**
+     * Re-acquire the exclusive session lock after a read-only start so a write
+     * can persist for the rest of the request. No-op unless the session was
+     * started read-only and its lock has since been released. Re-opens with the
+     * same id and without re-sending the cookie (already set during start()).
+     *
+     * PHP has no API to take the lock back without also re-reading the session, so
+     * the session_start() below repopulates $_SESSION from storage. Whatever this
+     * request already put there is kept and the fresh read laid underneath it, so a
+     * write made before the reopen survives while a key a concurrent request added
+     * in the meantime still comes through. Two requests writing the same key is the
+     * one case the local value wins outright -- the read-modify-write tradeoff
+     * read_and_close already documents.
+     */
+    protected function reopen(): void
+    {
+        if (!$this->readonly) {
+            return;
+        }
+
+        $this->readonly = false;
+
+        if (\PHP_SAPI === 'cli' || \PHP_SESSION_ACTIVE === session_status()) {
+            return;
+        }
+
+        $options = $this->options;
+        $options['use_cookies'] = '0';
+
+        $current = $_SESSION;
+        $id = session_id();
+
+        $success = @session_start($options);
+
+        // The session can be gone by now: a concurrent request destroyed it, or gc
+        // collected it. With use_strict_mode on, PHP answers that by minting a new
+        // id, and because no cookie is sent the browser never learns about it, so
+        // every later write would land in a session nobody can read back. Give that
+        // one up and keep this request's data in memory instead.
+        if (!$success || session_id() !== $id) {
+            if (\PHP_SESSION_ACTIVE === session_status()) {
+                session_abort();
+            }
+            session_id($id);
+            $_SESSION = $current;
+
+            return;
+        }
+
+        $_SESSION = $current + $_SESSION;
     }
 
     /**
@@ -284,6 +347,10 @@ class Session implements SessionInterface
      */
     public function regenerateId()
     {
+        // Rotating the id writes — re-acquire the lock if it was released after
+        // a read-only start, otherwise the session would look unstarted here.
+        $this->reopen();
+
         if (!$this->isSessionStarted()) {
             return $this;
         }
@@ -347,6 +414,9 @@ class Session implements SessionInterface
      */
     public function invalidate()
     {
+        // Destroying the session writes — re-acquire the lock if it was released.
+        $this->reopen();
+
         $name = $this->getName();
         if (null !== $name) {
             $this->removeCookie();
@@ -373,11 +443,18 @@ class Session implements SessionInterface
      */
     public function close()
     {
-        if ($this->started) {
+        // After a read-only start the lock is released and the session closed, but
+        // this request may still have changed something $_SESSION holds by reference
+        // -- a flash message added to the Messages object, a mutated user -- which no
+        // __set() ever announced. Take the lock back one last time so those land.
+        $this->reopen();
+
+        if ($this->started && \PHP_SESSION_ACTIVE === session_status()) {
             session_write_close();
         }
 
         $this->started = false;
+        $this->readonly = false;
 
         return $this;
     }
@@ -387,6 +464,7 @@ class Session implements SessionInterface
      */
     public function clear()
     {
+        $this->reopen();
         session_unset();
 
         return $this;
@@ -441,6 +519,7 @@ class Session implements SessionInterface
     #[\ReturnTypeWillChange]
     public function __set($name, $value)
     {
+        $this->reopen();
         $_SESSION[$name] = $value;
     }
 
@@ -450,6 +529,7 @@ class Session implements SessionInterface
     #[\ReturnTypeWillChange]
     public function __unset($name)
     {
+        $this->reopen();
         unset($_SESSION[$name]);
     }
 
@@ -477,7 +557,7 @@ class Session implements SessionInterface
      * @param int|null $lifetime
      * @return array
      */
-    public function getCookieOptions(int $lifetime = null): array
+    public function getCookieOptions(?int $lifetime = null): array
     {
         $params = session_get_cookie_params();
 
@@ -519,7 +599,7 @@ class Session implements SessionInterface
 
         foreach (headers_list() as $header) {
             // Identify cookie headers
-            if (strpos($header, 'Set-Cookie:') === 0) {
+            if (str_starts_with($header, 'Set-Cookie:')) {
                 // Add all but session cookie(s).
                 if (!str_contains($header, $search)) {
                     $cookies[] = $header;
@@ -543,10 +623,9 @@ class Session implements SessionInterface
 
     /**
      * @param string $key
-     * @param mixed $value
      * @return void
      */
-    protected function setOption($key, $value)
+    protected function setOption($key, mixed $value)
     {
         if (!is_string($value)) {
             if (is_bool($value)) {

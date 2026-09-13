@@ -3,7 +3,7 @@
 /**
  * @package    Grav\Common\User
  *
- * @copyright  Copyright (c) 2015 - 2025 Trilby Media, LLC. All rights reserved.
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
  * @license    MIT License; see LICENSE file for details.
  */
 
@@ -27,6 +27,14 @@ use function is_string;
  */
 trait UserTrait
 {
+    /**
+     * Actions which may be authorized before the user has completed two-factor
+     * authentication. Matched exactly, never as a substring.
+     *
+     * @var string[]
+     */
+    protected const LOGIN_ACTIONS = ['login', 'site.login', 'admin.login'];
+
     /**
      * Authenticate user.
      *
@@ -76,7 +84,7 @@ trait UserTrait
      * @param  string|null $scope
      * @return bool|null
      */
-    public function authorize(string $action, string $scope = null): ?bool
+    public function authorize(string $action, ?string $scope = null): ?bool
     {
         // User needs to be enabled.
         if ($this->get('state', 'enabled') !== 'enabled') {
@@ -88,8 +96,11 @@ trait UserTrait
             return false;
         }
 
-        // User needs to be authorized (2FA).
-        if (strpos($action, 'login') === false && !$this->get('authorized', true)) {
+        // User needs to be authorized (2FA), unless this is a login action itself.
+        // Matched exactly: a substring test also exempted any operator-chosen
+        // permission whose name merely contained "login", such as `site.logins` or a
+        // plugin's `admin.plugin_logins`, granting it during the 2FA window.
+        if (!in_array($action, static::LOGIN_ACTIONS, true) && !$this->get('authorized', true)) {
             return false;
         }
 
@@ -184,7 +195,7 @@ trait UserTrait
                 return '';
             }
 
-            $hash = md5(strtolower(trim($email)));
+            $hash = md5(strtolower(trim((string) $email)));
 
             return 'https://www.gravatar.com/avatar/' . $hash;
         }

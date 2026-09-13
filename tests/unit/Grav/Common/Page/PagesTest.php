@@ -10,7 +10,7 @@ use RocketTheme\Toolbox\ResourceLocator\UniformResourceLocator;
 /**
  * Class PagesTest
  */
-class PagesTest extends \Codeception\TestCase\Test
+class PagesTest extends \PHPUnit\Framework\TestCase
 {
     /** @var Grav $grav */
     protected $grav;
@@ -21,8 +21,9 @@ class PagesTest extends \Codeception\TestCase\Test
     /** @var PageInterface $root_page */
     protected $root_page;
 
-    protected function _before(): void
+    protected function setUp(): void
     {
+        parent::setUp();
         $grav = Fixtures::get('grav');
         $this->grav = $grav();
         $this->pages = $this->grav['pages'];
@@ -42,6 +43,47 @@ class PagesTest extends \Codeception\TestCase\Test
         self::assertSame('/test', $this->pages->base());
         $this->pages->base('');
         self::assertSame($this->pages->base(), '');
+    }
+
+    public function testReferrerRoute(): void
+    {
+        $previous = $_SERVER['HTTP_REFERER'] ?? null;
+        $root = (string) $this->grav['base_url_absolute'];
+
+        try {
+            // A referrer within the given route comes back relative to it.
+            $langCode = null;
+            $_SERVER['HTTP_REFERER'] = "{$root}/admin/pages/home";
+            self::assertSame('/pages/home', $this->pages->referrerRoute($langCode, '/admin'));
+
+            // Landing on the route itself is still within it.
+            $langCode = null;
+            $_SERVER['HTTP_REFERER'] = "{$root}/admin";
+            self::assertSame('', $this->pages->referrerRoute($langCode, '/admin'));
+
+            // Outside the given route.
+            $langCode = null;
+            $_SERVER['HTTP_REFERER'] = "{$root}/blog/post";
+            self::assertNull($this->pages->referrerRoute($langCode, '/admin'));
+
+            // Off site, including a host that merely starts with ours.
+            foreach (["{$root}.attacker.tld/admin", 'https://attacker.tld/admin'] as $referrer) {
+                $langCode = null;
+                $_SERVER['HTTP_REFERER'] = $referrer;
+                self::assertNull($this->pages->referrerRoute($langCode, '/admin'), $referrer);
+            }
+
+            // No referrer at all.
+            $langCode = null;
+            unset($_SERVER['HTTP_REFERER']);
+            self::assertNull($this->pages->referrerRoute($langCode, '/admin'));
+        } finally {
+            if ($previous === null) {
+                unset($_SERVER['HTTP_REFERER']);
+            } else {
+                $_SERVER['HTTP_REFERER'] = $previous;
+            }
+        }
     }
 
     public function testLastModified(): void
@@ -108,8 +150,8 @@ class PagesTest extends \Codeception\TestCase\Test
         self::assertContains($folder . '/fake/simple-site/user/pages/02.blog/post-one', array_keys($subPagesSorted));
         self::assertContains($folder . '/fake/simple-site/user/pages/02.blog/post-two', array_keys($subPagesSorted));
 
-        self::assertSame(['slug' => 'post-one'], $subPagesSorted[$folder . '/fake/simple-site/user/pages/02.blog/post-one']);
-        self::assertSame(['slug' => 'post-two'], $subPagesSorted[$folder . '/fake/simple-site/user/pages/02.blog/post-two']);
+        self::assertSame('post-one', $subPagesSorted[$folder . '/fake/simple-site/user/pages/02.blog/post-one']['slug']);
+        self::assertSame('post-two', $subPagesSorted[$folder . '/fake/simple-site/user/pages/02.blog/post-two']['slug']);
 
         $subPagesSorted = $this->pages->sort($aPage, null, 'desc');
 
@@ -122,8 +164,8 @@ class PagesTest extends \Codeception\TestCase\Test
         self::assertContains($folder . '/fake/simple-site/user/pages/02.blog/post-one', array_keys($subPagesSorted));
         self::assertContains($folder . '/fake/simple-site/user/pages/02.blog/post-two', array_keys($subPagesSorted));
 
-        self::assertSame(['slug' => 'post-one'], $subPagesSorted[$folder . '/fake/simple-site/user/pages/02.blog/post-one']);
-        self::assertSame(['slug' => 'post-two'], $subPagesSorted[$folder . '/fake/simple-site/user/pages/02.blog/post-two']);
+        self::assertSame('post-one', $subPagesSorted[$folder . '/fake/simple-site/user/pages/02.blog/post-one']['slug']);
+        self::assertSame('post-two', $subPagesSorted[$folder . '/fake/simple-site/user/pages/02.blog/post-two']['slug']);
     }
 
     public function testSortCollection(): void
@@ -144,8 +186,8 @@ class PagesTest extends \Codeception\TestCase\Test
         self::assertContains($folder . '/fake/simple-site/user/pages/02.blog/post-one', array_keys($subPagesSorted));
         self::assertContains($folder . '/fake/simple-site/user/pages/02.blog/post-two', array_keys($subPagesSorted));
 
-        self::assertSame(['slug' => 'post-one'], $subPagesSorted[$folder . '/fake/simple-site/user/pages/02.blog/post-one']);
-        self::assertSame(['slug' => 'post-two'], $subPagesSorted[$folder . '/fake/simple-site/user/pages/02.blog/post-two']);
+        self::assertSame('post-one', $subPagesSorted[$folder . '/fake/simple-site/user/pages/02.blog/post-one']['slug']);
+        self::assertSame('post-two', $subPagesSorted[$folder . '/fake/simple-site/user/pages/02.blog/post-two']['slug']);
 
         $subPagesSorted = $this->pages->sortCollection($aPage->children(), $aPage->orderBy(), 'desc');
 
@@ -158,8 +200,8 @@ class PagesTest extends \Codeception\TestCase\Test
         self::assertContains($folder . '/fake/simple-site/user/pages/02.blog/post-one', array_keys($subPagesSorted));
         self::assertContains($folder . '/fake/simple-site/user/pages/02.blog/post-two', array_keys($subPagesSorted));
 
-        self::assertSame(['slug' => 'post-one'], $subPagesSorted[$folder . '/fake/simple-site/user/pages/02.blog/post-one']);
-        self::assertSame(['slug' => 'post-two'], $subPagesSorted[$folder . '/fake/simple-site/user/pages/02.blog/post-two']);
+        self::assertSame('post-one', $subPagesSorted[$folder . '/fake/simple-site/user/pages/02.blog/post-one']['slug']);
+        self::assertSame('post-two', $subPagesSorted[$folder . '/fake/simple-site/user/pages/02.blog/post-two']['slug']);
     }
 
     public function testGet(): void
@@ -185,7 +227,7 @@ class PagesTest extends \Codeception\TestCase\Test
 
         //Page existing
         $children = $this->pages->children($folder . '/fake/simple-site/user/pages/02.blog');
-        self::assertInstanceOf('Grav\Common\Page\Collection', $children);
+        self::assertInstanceOf(\Grav\Common\Page\Collection::class, $children);
 
         //Page not existing
         $children = $this->pages->children($folder . '/fake/whatever/non-existing');
@@ -228,6 +270,37 @@ class PagesTest extends \Codeception\TestCase\Test
         }
     }
 
+    public function testOfTypeAndNotOfType(): void
+    {
+        $all = $this->pages->all();
+        $templates = [];
+        foreach ($all as $page) {
+            $templates[$page->template()] = true;
+        }
+        self::assertArrayHasKey('blog', $templates);
+
+        $blogOnly = $this->pages->all()->ofType('blog');
+        foreach ($blogOnly as $page) {
+            self::assertSame('blog', $page->template());
+        }
+        self::assertGreaterThan(0, count($blogOnly->toArray()));
+
+        $withoutBlog = $this->pages->all()->notOfType('blog');
+        foreach ($withoutBlog as $page) {
+            self::assertNotSame('blog', $page->template());
+        }
+        self::assertSame(
+            count($all->toArray()),
+            count($blogOnly->toArray()) + count($withoutBlog->toArray())
+        );
+
+        $withoutBlogOrDefault = $this->pages->all()->notOfType(['blog', 'default']);
+        foreach ($withoutBlogOrDefault as $page) {
+            self::assertNotContains($page->template(), ['blog', 'default']);
+        }
+        self::assertGreaterThan(0, count($withoutBlogOrDefault->toArray()));
+    }
+
     public function testGetList(): void
     {
         $list = $this->pages->getList();
@@ -259,6 +332,40 @@ class PagesTest extends \Codeception\TestCase\Test
         $translatedLanguages = $page->translatedLanguages();
         $this->assertIsArray($translatedLanguages);
         $this->assertSame(["en" => "/translatedlong/part2", "fr" => "/translatedlong/part2"], $translatedLanguages);
+    }
+
+    public function testTranslatedLanguagesLocalizedSlug(): void
+    {
+        /** @var UniformResourceLocator $locator */
+        $locator = $this->grav['locator'];
+        $folder = $locator->findResource('tests://');
+
+        $page = $this->pages->get($folder . '/fake/simple-site/user/pages/06.localized-slug');
+        $this->assertInstanceOf(PageInterface::class, $page);
+        $translatedLanguages = $page->translatedLanguages();
+        $this->assertIsArray($translatedLanguages);
+        // The fr translation declares `slug: slug-localise`, so its route must use
+        // the localized slug rather than mirroring the default-language route.
+        $this->assertSame(["en" => "/localized-slug", "fr" => "/slug-localise"], $translatedLanguages);
+    }
+
+    public function testTranslatedLanguagesLocalizedAncestorSlug(): void
+    {
+        /** @var UniformResourceLocator $locator */
+        $locator = $this->grav['locator'];
+        $folder = $locator->findResource('tests://');
+
+        $page = $this->pages->get($folder . '/fake/simple-site/user/pages/07.localized-category/01.item');
+        $this->assertInstanceOf(PageInterface::class, $page);
+        $translatedLanguages = $page->translatedLanguages();
+        $this->assertIsArray($translatedLanguages);
+        // Regression test for getgrav/grav#4186: the ancestor `localized-category`
+        // declares `slug: categorie-localisee` in fr and the leaf declares
+        // `slug: article`, so BOTH segments must be localized — not just the leaf.
+        $this->assertSame(
+            ["en" => "/localized-category/item", "fr" => "/categorie-localisee/article"],
+            $translatedLanguages
+        );
     }
 
     public function testGetTypes(): void

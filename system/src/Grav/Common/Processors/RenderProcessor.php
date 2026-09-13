@@ -3,13 +3,14 @@
 /**
  * @package    Grav\Common\Processors
  *
- * @copyright  Copyright (c) 2015 - 2025 Trilby Media, LLC. All rights reserved.
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
  * @license    MIT License; see LICENSE file for details.
  */
 
 namespace Grav\Common\Processors;
 
 use Grav\Common\Page\Interfaces\PageInterface;
+use Grav\Common\Page\Markdown\MarkdownOutput;
 use Grav\Framework\Psr7\Response;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\ServerRequestInterface;
@@ -44,7 +45,11 @@ class RenderProcessor extends ProcessorBase
         }
 
         /** @var PageInterface $page */
-        $page = $this->container['page'];
+        $page = $container['page'];
+
+        if ($container['debugger']->enabled()) {
+            $page->cacheControl('no-store, no-cache, must-revalidate, max-age=0');
+        }
 
         // Use internal Grav output.
         $container->output = $output;
@@ -64,8 +69,13 @@ class RenderProcessor extends ProcessorBase
         $event = new Event(['page' => $page, 'output' => $html]);
         $this->container->fireEvent('onOutputRendered', $event);
 
+        $headers = $page->httpHeaders();
+        if ($page->templateFormat() === MarkdownOutput::FORMAT && MarkdownOutput::tokenHeaderEnabled()) {
+            $headers['X-Markdown-Tokens'] = (string)MarkdownOutput::estimateTokens($html);
+        }
+
         $this->stopTimer();
 
-        return new Response($page->httpResponseCode(), $page->httpHeaders(), $html);
+        return new Response($page->httpResponseCode(), $headers, $html);
     }
 }

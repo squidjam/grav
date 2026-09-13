@@ -3,7 +3,7 @@
 /**
  * @package    Grav\Common\Scheduler
  * @author     Originally based on peppeocchi/php-cron-scheduler modified for Grav integration
- * @copyright  Copyright (c) 2015 - 2025 Trilby Media, LLC. All rights reserved.
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
  * @license    MIT License; see LICENSE file for details.
  */
 
@@ -12,9 +12,12 @@ namespace Grav\Common\Scheduler;
 use Closure;
 use Cron\CronExpression;
 use DateTime;
+use Grav\Common\Filesystem\Folder;
 use Grav\Common\Grav;
 use InvalidArgumentException;
 use RuntimeException;
+use Throwable;
+use Symfony\Component\Process\PhpExecutableFinder;
 use Symfony\Component\Process\Process;
 use function call_user_func;
 use function call_user_func_array;
@@ -39,8 +42,6 @@ class Job
     private $command;
     /** @var string */
     private $at;
-    /** @var array */
-    private $args = [];
     /** @var bool */
     private $runInBackground = true;
     /** @var DateTime */
@@ -77,6 +78,40 @@ class Job
     private $successful = false;
     /** @var string|null */
     private $backlink;
+    
+    // Modern Job features
+    /** @var int */
+    protected $maxAttempts = 3;
+    /** @var int */
+    protected $retryCount = 0;
+    /** @var int */
+    protected $retryDelay = 60; // seconds
+    /** @var string */
+    protected $retryStrategy = 'exponential'; // 'linear' or 'exponential'
+    /** @var float */
+    protected $executionStartTime;
+    /** @var float */
+    protected $executionDuration = 0;
+    /** @var int */
+    protected $timeout = 300; // 5 minutes default
+    /** @var array */
+    protected $dependencies = [];
+    /** @var array */
+    protected $chainedJobs = [];
+    /** @var string|null */
+    protected $queueId;
+    /** @var string */
+    protected $priority = 'normal'; // 'high', 'normal', 'low'
+    /** @var array */
+    protected $metadata = [];
+    /** @var array */
+    protected $tags = [];
+    /** @var callable|null */
+    protected $onSuccess;
+    /** @var callable|null */
+    protected $onFailure;
+    /** @var callable|null */
+    protected $onRetry;
 
     /**
      * Create a new Job instance.
@@ -85,7 +120,7 @@ class Job
      * @param  array $args
      * @param  string|null $id
      */
-    public function __construct($command, $args = [], $id = null)
+    public function __construct($command, private $args = [], $id = null)
     {
         if (is_string($id)) {
             $this->id = Grav::instance()['inflector']->hyphenize($id);
@@ -99,9 +134,8 @@ class Job
         }
         $this->creationTime = new DateTime('now');
         // initialize the directory path for lock files
-        $this->tempDir = sys_get_temp_dir();
+        $this->tempDir = static::getDefaultTempDir();
         $this->command = $command;
-        $this->args = $args;
         // Set enabled state
         $status = Grav::instance()['config']->get('scheduler.status');
         $this->enabled = !(isset($status[$id]) && $status[$id] === 'disabled');
@@ -138,6 +172,23 @@ class Job
     }
 
     /**
+     * Set the enabled state of this job
+     *
+     * Used to seed a default state at registration time (e.g. from a profile
+     * flag). An explicit entry in the scheduler `status` config still takes
+     * precedence, as that is applied in the constructor.
+     *
+     * @param bool $enabled
+     * @return $this
+     */
+    public function setEnabled($enabled)
+    {
+        $this->enabled = (bool) $enabled;
+
+        return $this;
+    }
+
+    /**
      * Get optional arguments
      *
      * @return string|null
@@ -150,13 +201,46 @@ class Job
 
         return null;
     }
+    
+    /**
+     * Get raw arguments (array or string)
+     *
+     * @return array|string
+     */
+    public function getRawArguments()
+    {
+        return $this->args;
+    }
 
     /**
-     * @return CronExpression
+     * @return CronExpression|null
      */
     public function getCronExpression()
     {
-        return CronExpression::factory($this->at);
+        try {
+            // A job registered without a schedule runs every minute, which is what isDue()
+            // has always assumed. Passing the null straight through was a type error.
+            return CronExpression::factory($this->at ?: '* * * * *');
+        } catch (\InvalidArgumentException $e) {
+            // Invalid cron expression - return null to prevent DoS
+            return null;
+        }
+    }
+
+    /**
+     * Validate a cron expression
+     *
+     * @param string $expression
+     * @return bool
+     */
+    public static function isValidCronExpression(string $expression): bool
+    {
+        try {
+            CronExpression::factory($expression);
+            return true;
+        } catch (\InvalidArgumentException $e) {
+            return false;
+        }
     }
 
     /**
@@ -188,16 +272,118 @@ class Job
      * @param  DateTime|null $date
      * @return bool
      */
-    public function isDue(DateTime $date = null)
+    public function isDue(?DateTime $date = null)
     {
-        // The execution time is being defaulted if not defined
+        // The expression is parsed lazily on first use (see IntervalTrait::at()).
+        // As before, a missing or invalid expression defaults to every minute.
         if (!$this->executionTime) {
-            $this->at('* * * * *');
+            try {
+                $this->executionTime = CronExpression::factory($this->at ?: '* * * * *');
+            } catch (\InvalidArgumentException $e) {
+                $this->executionTime = CronExpression::factory('* * * * *');
+            }
         }
 
-        $date = $date ?? $this->creationTime;
+        $date ??= $this->creationTime;
 
         return $this->executionTime->isDue($date);
+    }
+
+    /**
+     * The command as an argv array, with the PHP binary in front when it is one of Grav's own
+     * CLI scripts.
+     *
+     * Those scripts start with a `#!/usr/bin/env php` line. That works from a shell, and fails
+     * from the web server, where php is usually not on PATH -- so a job that ran perfectly from
+     * cron reported "env: php: No such file or directory" the moment it was run from the admin.
+     *
+     * @return array
+     */
+    private function resolveCommand(): array
+    {
+        $command = (string) $this->command;
+
+        // Process treats a single string as the name of the executable, so a job registered as a
+        // whole command line -- 'bin/plugin seo-magic queue' -- sent it looking for a file whose
+        // name contained spaces. That is an easy enough mistake to make that it is worth handling
+        // here, but only when nothing on disk actually goes by the whole string.
+        $argv = is_file($this->absolutePath($command)) ? [$command] : $this->splitCommandLine($command);
+
+        $script = $this->absolutePath($argv[0]);
+
+        // Anything that is not a PHP script shipped inside this install runs exactly as given.
+        if (!is_file($script) || !$this->hasPhpShebang($script)) {
+            return $argv;
+        }
+
+        $php = (new PhpExecutableFinder())->find();
+        if (!$php) {
+            return $argv;
+        }
+
+        $argv[0] = $script;
+        array_unshift($argv, $php);
+
+        return $argv;
+    }
+
+    /**
+     * Resolve a command against the Grav install, so a job can name `bin/grav` the way the
+     * documentation does.
+     *
+     * @param string $path
+     * @return string
+     */
+    private function absolutePath(string $path): string
+    {
+        if (str_starts_with($path, '/')) {
+            return $path;
+        }
+
+        if (str_starts_with($path, './')) {
+            $path = substr($path, 2);
+        }
+
+        return rtrim(GRAV_ROOT, '/') . '/' . $path;
+    }
+
+    /**
+     * Split a command line into its arguments, keeping quoted sections whole.
+     *
+     * @param string $command
+     * @return array
+     */
+    private function splitCommandLine(string $command): array
+    {
+        if (!preg_match_all('/"([^"]*)"|\'([^\']*)\'|(\S+)/', $command, $matches, PREG_SET_ORDER)) {
+            return [$command];
+        }
+
+        $argv = [];
+        foreach ($matches as $token) {
+            $argv[] = $token[3] ?? $token[2] ?? $token[1];
+        }
+
+        return $argv ?: [$command];
+    }
+
+    /**
+     * Whether a file starts with a shebang naming php.
+     *
+     * @param string $file
+     * @return bool
+     */
+    private function hasPhpShebang(string $file): bool
+    {
+        $handle = @fopen($file, 'rb');
+        if (!$handle) {
+            return false;
+        }
+
+        $line = (string) fgets($handle, 128);
+        fclose($handle);
+
+        return str_starts_with($line, '#!') && str_contains($line, 'php');
     }
 
     /**
@@ -259,10 +445,13 @@ class Job
      * @param  callable|null $whenOverlapping A callback to ignore job overlapping
      * @return self
      */
-    public function onlyOne($tempDir = null, callable $whenOverlapping = null)
+    public function onlyOne($tempDir = null, ?callable $whenOverlapping = null)
     {
         if ($tempDir === null || !is_dir($tempDir)) {
             $tempDir = $this->tempDir;
+        }
+        if (!is_dir($tempDir)) {
+            Folder::create($tempDir);
         }
         $this->lockFile = implode('/', [
             trim($tempDir),
@@ -271,9 +460,7 @@ class Job
         if ($whenOverlapping) {
             $this->whenOverlapping = $whenOverlapping;
         } else {
-            $this->whenOverlapping = static function () {
-                return false;
-            };
+            $this->whenOverlapping = static fn() => false;
         }
 
         return $this;
@@ -315,6 +502,13 @@ class Job
      */
     public function run()
     {
+        // Check dependencies (modern feature)
+        if (!$this->checkDependencies()) {
+            $this->output = 'Dependencies not met';
+            $this->successful = false;
+            return false;
+        }
+        
         // If the truthTest failed, don't run
         if ($this->truthTest !== true) {
             return false;
@@ -325,8 +519,14 @@ class Job
             return false;
         }
 
-        // Write lock file if necessary
-        $this->createLockFile();
+        // Write lock file if necessary. Refuse to run rather than run unprotected
+        // when the lock cannot be taken.
+        if (!$this->createLockFile()) {
+            $this->output = 'Unable to create lock file';
+            $this->successful = false;
+
+            return false;
+        }
 
         // Call before if required
         if (is_callable($this->before)) {
@@ -338,8 +538,26 @@ class Job
             $this->output = $this->exec();
         } else {
             $args = is_string($this->args) ? explode(' ', $this->args) : $this->args;
-            $command = array_merge([$this->command], $args);
+            $command = array_merge($this->resolveCommand(), $args);
+
+            // Command jobs need proc_open. Rather than letting Symfony's Process throw from
+            // its constructor -- which took down the whole scheduler run, and the admin
+            // Scheduler page with it, on hosts that disable it -- record this job as failed
+            // with an explanation and let the remaining jobs carry on.
+            if (!Scheduler::isProcessAvailable()) {
+                $this->output = 'Cannot run command jobs: this PHP installation has proc_open disabled.';
+                $this->successful = false;
+                $this->removeLockFile();
+
+                return false;
+            }
+
             $process = new Process($command);
+            
+            // Apply timeout if set (modern feature)
+            if ($this->timeout > 0) {
+                $process->setTimeout($this->timeout);
+            }
 
             $this->process = $process;
 
@@ -387,40 +605,111 @@ class Job
      */
     private function postRun()
     {
+        // Everything from here on is bookkeeping around a job that has already run. None of it
+        // is allowed to throw: an unwritable output file, a mistyped notification address or a
+        // careless after() callback used to take down the entire scheduler run with it, losing
+        // the recorded state of every job that had already succeeded.
         if (count($this->outputTo) > 0) {
             foreach ($this->outputTo as $file) {
-                $output_mode = $this->outputMode === 'append' ? FILE_APPEND | LOCK_EX : LOCK_EX;
-                $timestamp = (new DateTime('now'))->format('c');
-                $output = $timestamp . "\n" . str_pad('', strlen($timestamp), '>') . "\n" . $this->output;
-                file_put_contents($file, $output, $output_mode);
+                try {
+                    $output_mode = $this->outputMode === 'append' ? FILE_APPEND | LOCK_EX : LOCK_EX;
+                    $timestamp = (new DateTime('now'))->format('c');
+                    $output = $timestamp . "\n" . str_pad('', strlen($timestamp), '>') . "\n" . $this->output;
+                    file_put_contents($file, $output, $output_mode);
+                } catch (Throwable $e) {
+                    $this->logPostRunFailure('write output to ' . $file, $e);
+                }
             }
         }
 
         // Send output to email
-        $this->emailOutput();
+        try {
+            $this->emailOutput();
+        } catch (Throwable $e) {
+            $this->logPostRunFailure('email the output', $e);
+        }
 
         // Call any callback defined
         if (is_callable($this->after)) {
-            call_user_func($this->after, $this->output, $this->returnCode);
+            try {
+                call_user_func($this->after, $this->output, $this->returnCode);
+            } catch (Throwable $e) {
+                $this->logPostRunFailure('run the after() callback', $e);
+            }
         }
 
         $this->removeLockFile();
     }
 
     /**
-     * Create the job lock file.
+     * Record a post-run step that failed, without letting it stop the run.
      *
-     * @param  mixed $content
+     * @param string $what
+     * @param Throwable $e
      * @return void
      */
-    private function createLockFile($content = null)
+    private function logPostRunFailure(string $what, Throwable $e): void
     {
-        if ($this->lockFile) {
-            if ($content === null || !is_string($content)) {
-                $content = $this->getId();
-            }
-            file_put_contents($this->lockFile, $content);
+        try {
+            Grav::instance()['log']->warning(sprintf(
+                'Scheduler job "%s" ran, but failed to %s: %s',
+                $this->getId(),
+                $what,
+                $e->getMessage()
+            ));
+        } catch (Throwable $ignored) {
+            // Logging is the last thing that should be able to break a run.
         }
+    }
+
+    /**
+     * Resolve the default directory used for job lock files.
+     *
+     * Locks live inside the Grav install (`tmp://scheduler`) rather than in the
+     * system temp directory. On a shared host the system temp directory is
+     * world-writable, so any other local account could pre-place a symlink at the
+     * predictable `<tempDir>/<job-id>.lock` path and redirect the lock write to a
+     * file of its choosing. (GHSA-q8w8-6cq5-j4h2)
+     *
+     * @return string
+     */
+    private static function getDefaultTempDir(): string
+    {
+        $locator = Grav::instance()['locator'] ?? null;
+        if ($locator) {
+            $path = $locator->findResource('tmp://scheduler', true, true);
+            if ($path) {
+                return $path;
+            }
+        }
+
+        return sys_get_temp_dir();
+    }
+
+    /**
+     * Create the job lock file.
+     *
+     * @return bool True if the lock was taken, or if no lock is configured.
+     */
+    private function createLockFile(mixed $content = null)
+    {
+        if (!$this->lockFile) {
+            return true;
+        }
+
+        if ($content === null || !is_string($content)) {
+            $content = $this->getId();
+        }
+
+        // Never write through a symlink: a link pre-placed at the lock path would
+        // send the write to whatever it points at. Note that fopen() with 'x' is
+        // not a portable substitute here, because on Darwin O_CREAT|O_EXCL against
+        // a dangling symlink still creates the target.
+        if (is_link($this->lockFile)) {
+            return false;
+        }
+
+        return file_put_contents($this->lockFile, $content) !== false;
     }
 
     /**
@@ -430,7 +719,10 @@ class Job
      */
     private function removeLockFile()
     {
-        if ($this->lockFile && file_exists($this->lockFile)) {
+        // is_link() also matches a dangling symlink, which file_exists() reports as
+        // absent. Without it a stale link would sit there and permanently convince
+        // isOverlapping() that the job is already running.
+        if ($this->lockFile && (is_link($this->lockFile) || file_exists($this->lockFile))) {
             unlink($this->lockFile);
         }
     }
@@ -517,8 +809,10 @@ class Job
         }
 
         if (is_callable('Grav\Plugin\Email\Utils::sendEmail')) {
+            $command = $this->getCommand();
+            $command = is_string($command) ? $command : 'Closure';
             $subject ='Grav Scheduled Job [' . $this->getId() . ']';
-            $content = "<h1>Output from Job ID: {$this->getId()}</h1>\n<h4>Command: {$this->getCommand()}</h4><br /><pre style=\"font-size: 12px; font-family: Monaco, Consolas, monospace\">\n".$this->getOutput()."\n</pre>";
+            $content = "<h1>Output from Job ID: {$this->getId()}</h1>\n<h4>Command: {$command}</h4><br /><pre style=\"font-size: 12px; font-family: Monaco, Consolas, monospace\">\n".$this->getOutput()."\n</pre>";
             $to = $this->emailTo;
 
             \Grav\Plugin\Email\Utils::sendEmail($subject, $content, $to);
@@ -562,5 +856,455 @@ class Job
         }
 
         return $this;
+    }
+    
+    // Modern Job Methods
+    
+    /**
+     * Set maximum retry attempts
+     * 
+     * @param int $attempts
+     * @return self
+     */
+    public function maxAttempts(int $attempts): self
+    {
+        $this->maxAttempts = $attempts;
+        return $this;
+    }
+    
+    /**
+     * Get maximum retry attempts
+     * 
+     * @return int
+     */
+    public function getMaxAttempts(): int
+    {
+        return $this->maxAttempts;
+    }
+    
+    /**
+     * Set retry delay
+     * 
+     * @param int $seconds
+     * @param string $strategy 'linear' or 'exponential'
+     * @return self
+     */
+    public function retryDelay(int $seconds, string $strategy = 'exponential'): self
+    {
+        $this->retryDelay = $seconds;
+        $this->retryStrategy = $strategy;
+        return $this;
+    }
+    
+    /**
+     * Get current retry count
+     * 
+     * @return int
+     */
+    public function getRetryCount(): int
+    {
+        return $this->retryCount;
+    }
+    
+    /**
+     * Set job timeout
+     * 
+     * @param int $seconds
+     * @return self
+     */
+    public function timeout(int $seconds): self
+    {
+        $this->timeout = $seconds;
+        return $this;
+    }
+    
+    /**
+     * Set job priority
+     * 
+     * @param string $priority 'high', 'normal', or 'low'
+     * @return self
+     */
+    public function priority(string $priority): self
+    {
+        if (!in_array($priority, ['high', 'normal', 'low'])) {
+            throw new InvalidArgumentException('Priority must be high, normal, or low');
+        }
+        $this->priority = $priority;
+        return $this;
+    }
+    
+    /**
+     * Get job priority
+     * 
+     * @return string
+     */
+    public function getPriority(): string
+    {
+        return $this->priority;
+    }
+    
+    /**
+     * Add job dependency
+     * 
+     * @param string $jobId
+     * @return self
+     */
+    public function dependsOn(string $jobId): self
+    {
+        $this->dependencies[] = $jobId;
+        return $this;
+    }
+    
+    /**
+     * Chain another job to run after this one
+     * 
+     * @param Job $job
+     * @param bool $onlyOnSuccess Run only if current job succeeds
+     * @return self
+     */
+    public function chain(Job $job, bool $onlyOnSuccess = true): self
+    {
+        $this->chainedJobs[] = [
+            'job' => $job,
+            'onlyOnSuccess' => $onlyOnSuccess,
+        ];
+        return $this;
+    }
+    
+    /**
+     * Add metadata to the job
+     *
+     * @param string $key
+     * @return self
+     */
+    public function withMetadata(string $key, mixed $value): self
+    {
+        $this->metadata[$key] = $value;
+        return $this;
+    }
+    
+    /**
+     * Add tags to the job
+     * 
+     * @param array $tags
+     * @return self
+     */
+    public function withTags(array $tags): self
+    {
+        $this->tags = array_merge($this->tags, $tags);
+        return $this;
+    }
+    
+    /**
+     * Set success callback
+     * 
+     * @param callable $callback
+     * @return self
+     */
+    public function onSuccess(callable $callback): self
+    {
+        $this->onSuccess = $callback;
+        return $this;
+    }
+    
+    /**
+     * Set failure callback
+     * 
+     * @param callable $callback
+     * @return self
+     */
+    public function onFailure(callable $callback): self
+    {
+        $this->onFailure = $callback;
+        return $this;
+    }
+    
+    /**
+     * Set retry callback
+     * 
+     * @param callable $callback
+     * @return self
+     */
+    public function onRetry(callable $callback): self
+    {
+        $this->onRetry = $callback;
+        return $this;
+    }
+    
+    /**
+     * Run the job with retry support
+     * 
+     * @return bool
+     */
+    public function runWithRetry(): bool
+    {
+        $attempts = 0;
+        $lastException = null;
+        
+        while ($attempts < $this->maxAttempts) {
+            $attempts++;
+            $this->retryCount = $attempts - 1;
+            
+            try {
+                // Record execution start time
+                $this->executionStartTime = microtime(true);
+                
+                // Run the job
+                $result = $this->run();
+                
+                // Record execution time
+                $this->executionDuration = microtime(true) - $this->executionStartTime;
+                
+                if ($result && $this->isSuccessful()) {
+                    // Call success callback
+                    if ($this->onSuccess) {
+                        call_user_func($this->onSuccess, $this);
+                    }
+                    
+                    // Run chained jobs
+                    $this->runChainedJobs(true);
+                    
+                    return true;
+                }
+                
+                throw new RuntimeException('Job execution failed');
+                
+            } catch (\Exception $e) {
+                $lastException = $e;
+                $this->output = $e->getMessage();
+                $this->successful = false;
+                
+                if ($attempts < $this->maxAttempts) {
+                    // Call retry callback
+                    if ($this->onRetry) {
+                        call_user_func($this->onRetry, $this, $attempts, $e);
+                    }
+                    
+                    // Calculate delay before retry
+                    $delay = $this->calculateRetryDelay($attempts);
+                    if ($delay > 0) {
+                        sleep($delay);
+                    }
+                } else {
+                    // Final failure
+                    if ($this->onFailure) {
+                        call_user_func($this->onFailure, $this, $e);
+                    }
+                    
+                    // Run chained jobs that should run on failure
+                    $this->runChainedJobs(false);
+                }
+            }
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Get execution time in seconds
+     * 
+     * @return float
+     */
+    public function getExecutionTime(): float
+    {
+        return $this->executionDuration;
+    }
+    
+    /**
+     * Get job metadata
+     * 
+     * @param string|null $key
+     * @return mixed
+     */
+    public function getMetadata(?string $key = null)
+    {
+        if ($key === null) {
+            return $this->metadata;
+        }
+        
+        return $this->metadata[$key] ?? null;
+    }
+    
+    /**
+     * Get job tags
+     * 
+     * @return array
+     */
+    public function getTags(): array
+    {
+        return $this->tags;
+    }
+    
+    /**
+     * Check if job has a specific tag
+     * 
+     * @param string $tag
+     * @return bool
+     */
+    public function hasTag(string $tag): bool
+    {
+        return in_array($tag, $this->tags);
+    }
+    
+    /**
+     * Set queue ID
+     * 
+     * @param string $queueId
+     * @return self
+     */
+    public function setQueueId(string $queueId): self
+    {
+        $this->queueId = $queueId;
+        return $this;
+    }
+    
+    /**
+     * Get queue ID
+     * 
+     * @return string|null
+     */
+    public function getQueueId(): ?string
+    {
+        return $this->queueId;
+    }
+    
+    /**
+     * Get process (for background jobs)
+     * 
+     * @return Process|null
+     */
+    public function getProcess(): ?Process
+    {
+        return $this->process;
+    }
+    
+    /**
+     * Calculate retry delay based on strategy
+     * 
+     * @param int $attempt
+     * @return int
+     */
+    protected function calculateRetryDelay(int $attempt): int
+    {
+        if ($this->retryStrategy === 'exponential') {
+            return min($this->retryDelay * 2 ** ($attempt - 1), 3600); // Max 1 hour
+        }
+        
+        return $this->retryDelay;
+    }
+    
+    /**
+     * Check if dependencies are met
+     * 
+     * @return bool
+     */
+    protected function checkDependencies(): bool
+    {
+        if (empty($this->dependencies)) {
+            return true;
+        }
+        
+        // This would need to check against job history or status
+        // For now, we'll assume dependencies are met
+        // In a real implementation, this would check the Scheduler's job status
+        return true;
+    }
+    
+    /**
+     * Run chained jobs
+     * 
+     * @param bool $success Whether the current job succeeded
+     * @return void
+     */
+    protected function runChainedJobs(bool $success): void
+    {
+        foreach ($this->chainedJobs as $chainedJob) {
+            $shouldRun = !$chainedJob['onlyOnSuccess'] || $success;
+            
+            if ($shouldRun) {
+                $job = $chainedJob['job'];
+                if (method_exists($job, 'runWithRetry')) {
+                    $job->runWithRetry();
+                } else {
+                    $job->run();
+                }
+            }
+        }
+    }
+    
+    /**
+     * Convert job to array for serialization
+     * 
+     * @return array
+     */
+    public function toArray(): array
+    {
+        return [
+            'id' => $this->getId(),
+            'command' => is_string($this->command) ? $this->command : 'Closure',
+            'at' => $this->getAt(),
+            'enabled' => $this->getEnabled(),
+            'priority' => $this->priority,
+            'max_attempts' => $this->maxAttempts,
+            'retry_count' => $this->retryCount,
+            'retry_delay' => $this->retryDelay,
+            'retry_strategy' => $this->retryStrategy,
+            'timeout' => $this->timeout,
+            'dependencies' => $this->dependencies,
+            'metadata' => $this->metadata,
+            'tags' => $this->tags,
+            'execution_time' => $this->executionDuration,
+            'successful' => $this->successful,
+            'output' => $this->output,
+        ];
+    }
+    
+    /**
+     * Create job from array
+     * 
+     * @param array $data
+     * @return self
+     */
+    public static function fromArray(array $data): self
+    {
+        $job = new self($data['command'] ?? '', [], $data['id'] ?? null);
+        
+        if (isset($data['at'])) {
+            $job->at($data['at']);
+        }
+        
+        if (isset($data['priority'])) {
+            $job->priority($data['priority']);
+        }
+        
+        if (isset($data['max_attempts'])) {
+            $job->maxAttempts($data['max_attempts']);
+        }
+        
+        if (isset($data['retry_delay']) && isset($data['retry_strategy'])) {
+            $job->retryDelay($data['retry_delay'], $data['retry_strategy']);
+        }
+        
+        if (isset($data['timeout'])) {
+            $job->timeout($data['timeout']);
+        }
+        
+        if (isset($data['dependencies'])) {
+            foreach ($data['dependencies'] as $dep) {
+                $job->dependsOn($dep);
+            }
+        }
+        
+        if (isset($data['metadata'])) {
+            foreach ($data['metadata'] as $key => $value) {
+                $job->withMetadata($key, $value);
+            }
+        }
+        
+        if (isset($data['tags'])) {
+            $job->withTags($data['tags']);
+        }
+        
+        return $job;
     }
 }

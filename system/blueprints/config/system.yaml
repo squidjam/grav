@@ -53,10 +53,9 @@ form:
               type: checkboxes
               label: PLUGIN_ADMIN.PROCESS
               help: PLUGIN_ADMIN.PROCESS_HELP
-              default: [markdown: true, twig: true]
+              default: [markdown: true]
               options:
                 markdown: Markdown
-                twig: Twig
               use: keys
 
             pages.types:
@@ -66,6 +65,75 @@ form:
               size: small
               default: ['html','htm','json','xml','txt','rss','atom']
               value_only: true
+
+            markdown_output_section:
+              type: section
+              title: PLUGIN_ADMIN.MARKDOWN_OUTPUT
+              underline: true
+
+            pages.markdown_output.enabled:
+              type: toggle
+              label: PLUGIN_ADMIN.MARKDOWN_OUTPUT_ENABLED
+              help: PLUGIN_ADMIN.MARKDOWN_OUTPUT_ENABLED_HELP
+              highlight: 1
+              options:
+                1: PLUGIN_ADMIN.YES
+                0: PLUGIN_ADMIN.NO
+              validate:
+                type: bool
+
+            pages.markdown_output.frontmatter:
+              type: toggle
+              label: PLUGIN_ADMIN.MARKDOWN_OUTPUT_FRONTMATTER
+              help: PLUGIN_ADMIN.MARKDOWN_OUTPUT_FRONTMATTER_HELP
+              highlight: 1
+              options:
+                1: PLUGIN_ADMIN.YES
+                0: PLUGIN_ADMIN.NO
+              validate:
+                type: bool
+
+            pages.markdown_output.links:
+              type: toggle
+              label: PLUGIN_ADMIN.MARKDOWN_OUTPUT_LINKS
+              help: PLUGIN_ADMIN.MARKDOWN_OUTPUT_LINKS_HELP
+              highlight: 1
+              options:
+                1: PLUGIN_ADMIN.YES
+                0: PLUGIN_ADMIN.NO
+              validate:
+                type: bool
+
+            pages.markdown_output.max_links:
+              type: number
+              size: x-small
+              label: PLUGIN_ADMIN.MARKDOWN_OUTPUT_MAX_LINKS
+              help: PLUGIN_ADMIN.MARKDOWN_OUTPUT_MAX_LINKS_HELP
+              validate:
+                type: int
+                min: 0
+
+            pages.markdown_output.absolute_urls:
+              type: toggle
+              label: PLUGIN_ADMIN.MARKDOWN_OUTPUT_ABSOLUTE_URLS
+              help: PLUGIN_ADMIN.MARKDOWN_OUTPUT_ABSOLUTE_URLS_HELP
+              highlight: 1
+              options:
+                1: PLUGIN_ADMIN.YES
+                0: PLUGIN_ADMIN.NO
+              validate:
+                type: bool
+
+            pages.markdown_output.token_header:
+              type: toggle
+              label: PLUGIN_ADMIN.MARKDOWN_OUTPUT_TOKEN_HEADER
+              help: PLUGIN_ADMIN.MARKDOWN_OUTPUT_TOKEN_HEADER_HELP
+              highlight: 1
+              options:
+                1: PLUGIN_ADMIN.YES
+                0: PLUGIN_ADMIN.NO
+              validate:
+                type: bool
 
             timezone:
               type: select
@@ -104,6 +172,7 @@ form:
                 "d-m-y G:i": Date4
                 "jS M Y": Date5
                 "Y-m-d G:i": Date6
+                "Y-m-d": Date7
 
             pages.dateformat.long:
               type: dateformat
@@ -118,6 +187,7 @@ form:
                 "d-m-y G:i": Date4
                 "jS M Y": Date5
                 "Y-m-d G:i:s": Date6
+                "Y-m-d H:i": Date7
 
             pages.order.by:
               type: select
@@ -140,6 +210,22 @@ form:
               options:
                 asc: PLUGIN_ADMIN.ASCENDING
                 desc: PLUGIN_ADMIN.DESCENDING
+
+            pages.order_digits:
+              type: select
+              size: x-small
+              label: PLUGIN_ADMIN.ORDER_DIGITS
+              help: PLUGIN_ADMIN.ORDER_DIGITS_HELP
+              default: 2
+              options:
+                1: '1 (e.g. 5.about)'
+                2: '2 (e.g. 05.about)'
+                3: '3 (e.g. 005.about)'
+                4: '4 (e.g. 0005.about)'
+              validate:
+                type: int
+                min: 1
+                max: 6
 
             pages.list.count:
               type: text
@@ -439,6 +525,24 @@ form:
               validate:
                 type: bool
 
+            languages.http_accept_language_fallback:
+              type: list
+              label: PLUGIN_ADMIN.HTTP_ACCEPT_LANGUAGE_FALLBACK
+              help: PLUGIN_ADMIN.HTTP_ACCEPT_LANGUAGE_FALLBACK_HELP
+              fields:
+                key:
+                  type: key
+                  label: PLUGIN_ADMIN.LANGUAGE
+                  help: PLUGIN_ADMIN.HTTP_ACCEPT_LANGUAGE_FALLBACK_SOURCE_HELP
+                  placeholder: hr
+                value:
+                  type: selectize
+                  size: large
+                  placeholder: "bs, en"
+                  label: PLUGIN_ADMIN.HTTP_ACCEPT_LANGUAGE_FALLBACK_TARGETS
+                  help: PLUGIN_ADMIN.HTTP_ACCEPT_LANGUAGE_FALLBACK_TARGETS_HELP
+                  classes: fancy
+
             languages.override_locale:
               type: toggle
               label: PLUGIN_ADMIN.OVERRIDE_LOCALE
@@ -529,7 +633,7 @@ form:
 
             pages.markdown.extra:
               type: toggle
-              label: Markdown extra
+              label: PLUGIN_ADMIN.MARKDOWN_EXTRA
               help: PLUGIN_ADMIN.MARKDOWN_EXTRA_HELP
               highlight: 0
               options:
@@ -561,6 +665,96 @@ form:
               type: toggle
               label: PLUGIN_ADMIN.ESCAPE_MARKUP
               help: PLUGIN_ADMIN.ESCAPE_MARKUP_HELP
+              highlight: 0
+              options:
+                1: PLUGIN_ADMIN.YES
+                0: PLUGIN_ADMIN.NO
+              validate:
+                type: bool
+            pages.markdown.gfm.task_lists:
+              type: toggle
+              label: GFM Task Lists
+              help: 'Render `- [ ]` and `- [x]` list items as checkboxes.'
+              highlight: 1
+              options:
+                1: PLUGIN_ADMIN.YES
+                0: PLUGIN_ADMIN.NO
+              validate:
+                type: bool
+            pages.markdown.gfm.marks:
+              type: toggle
+              label: GFM Highlight / Sub / Superscript
+              help: 'Enable ==highlight==, ~subscript~, and ^superscript^ inline syntax.'
+              highlight: 1
+              options:
+                1: PLUGIN_ADMIN.YES
+                0: PLUGIN_ADMIN.NO
+              validate:
+                type: bool
+            pages.markdown.gfm.tagfilter:
+              type: toggle
+              label: GFM Tag Filter
+              help: 'Escape disallowed raw HTML tags (script, iframe, style, and similar) in output.'
+              highlight: 1
+              options:
+                1: PLUGIN_ADMIN.YES
+                0: PLUGIN_ADMIN.NO
+              validate:
+                type: bool
+            pages.markdown.gfm.autolinks:
+              type: toggle
+              label: GFM Autolinks
+              help: 'Autolink bare www. URLs and email addresses (bare http(s):// links use Automatic HTML Links above).'
+              highlight: 1
+              options:
+                1: PLUGIN_ADMIN.YES
+                0: PLUGIN_ADMIN.NO
+              validate:
+                type: bool
+            pages.markdown.tables.colspan:
+              type: toggle
+              label: Table Cell Colspan
+              help: 'Non-standard: an empty table cell merges into the cell on its left (colspan).'
+              highlight: 0
+              options:
+                1: PLUGIN_ADMIN.YES
+                0: PLUGIN_ADMIN.NO
+              validate:
+                type: bool
+            pages.markdown.tables.headerless:
+              type: toggle
+              label: Header-less Tables
+              help: 'Non-standard: a table may start with the divider row, with no header row above it.'
+              highlight: 0
+              options:
+                1: PLUGIN_ADMIN.YES
+                0: PLUGIN_ADMIN.NO
+              validate:
+                type: bool
+            pages.markdown.tables.captions:
+              type: toggle
+              label: Table Captions
+              help: 'Non-standard: a `[Caption]` line immediately after a table becomes a `<caption>` element.'
+              highlight: 0
+              options:
+                1: PLUGIN_ADMIN.YES
+                0: PLUGIN_ADMIN.NO
+              validate:
+                type: bool
+            pages.markdown.tables.attributes:
+              type: toggle
+              label: Table Attributes
+              help: 'Non-standard: a `{.class #id}` (or `{:.class}`) line immediately after a table sets the class and id on the table element.'
+              highlight: 0
+              options:
+                1: PLUGIN_ADMIN.YES
+                0: PLUGIN_ADMIN.NO
+              validate:
+                type: bool
+            pages.markdown.tables.multiline:
+              type: toggle
+              label: Multi-line Table Cells
+              help: 'Non-standard: a table row ending in a backslash continues onto the next line, joining cells with a line break.'
               highlight: 0
               options:
                 1: PLUGIN_ADMIN.YES
@@ -610,6 +804,26 @@ form:
                 hash: All files timestamps
                 none: No timestamp checking
 
+            cache.check.interval:
+              type: number
+              size: x-small
+              label: PLUGIN_ADMIN.CACHE_CHECK_INTERVAL
+              help: PLUGIN_ADMIN.CACHE_CHECK_INTERVAL_HELP
+              validate:
+                type: int
+                min: 0
+
+            pages.lazy_index:
+              type: toggle
+              label: 'Lazy page index (experimental)'
+              help: 'Load pages, routes and taxonomy on demand from a per-page SQLite index instead of one large cache blob. Falls back to the classic cache automatically when no database engine is available.'
+              highlight: 0
+              options:
+                1: PLUGIN_ADMIN.YES
+                0: PLUGIN_ADMIN.NO
+              validate:
+                type: bool
+
             cache.driver:
               type: select
               size: small
@@ -619,11 +833,9 @@ form:
               options:
                 auto: Auto detect
                 file: File
-                apc: APC
                 apcu: APCu
                 memcache: Memcache
                 memcached: Memcached
-                wincache: WinCache
                 redis: Redis
 
             cache.prefix:
@@ -632,6 +844,19 @@ form:
               label: PLUGIN_ADMIN.CACHE_PREFIX
               help: PLUGIN_ADMIN.CACHE_PREFIX_HELP
               placeholder: PLUGIN_ADMIN.CACHE_PREFIX_PLACEHOLDER
+
+            cache.purge_max_age_days:
+                type: text
+                size: x-small
+                append: GRAV.NICETIME.DAY_PLURAL
+                label: PLUGIN_ADMIN.CACHE_PURGE_AGE
+                help: PLUGIN_ADMIN.CACHE_PURGE_AGE_HELP
+                validate:
+                    type: number
+                    min: 1
+                    max: 365
+                    step: 1
+                default: 30
 
             cache.purge_at:
               type: cron
@@ -707,20 +932,6 @@ form:
               validate:
                 type: bool
 
-            cache.memcache.server:
-              type: text
-              size: medium
-              label: PLUGIN_ADMIN.MEMCACHE_SERVER
-              help: PLUGIN_ADMIN.MEMCACHE_SERVER_HELP
-              placeholder: "localhost"
-
-            cache.memcache.port:
-              type: text
-              size: small
-              label: PLUGIN_ADMIN.MEMCACHE_PORT
-              help: PLUGIN_ADMIN.MEMCACHE_PORT_HELP
-              placeholder: "11211"
-
             cache.memcached.server:
               type: text
               size: medium
@@ -778,8 +989,8 @@ form:
             flex.cache.index.enabled:
               type: toggle
               label: PLUGIN_ADMIN.FLEX_INDEX_CACHE_ENABLED
-              highlight: 1
-              default: 1
+              highlight: 0
+              default: 0
               options:
                 1: PLUGIN_ADMIN.ENABLED
                 0: PLUGIN_ADMIN.DISABLED
@@ -796,8 +1007,8 @@ form:
             flex.cache.object.enabled:
               type: toggle
               label: PLUGIN_ADMIN.FLEX_OBJECT_CACHE_ENABLED
-              highlight: 1
-              default: 1
+              highlight: 0
+              default: 0
               options:
                 1: PLUGIN_ADMIN.ENABLED
                 0: PLUGIN_ADMIN.DISABLED
@@ -878,17 +1089,6 @@ form:
               help: PLUGIN_ADMIN.AUTOESCAPE_VARIABLES_HELP
               highlight: 1
               default: 1
-              options:
-                1: PLUGIN_ADMIN.YES
-                0: PLUGIN_ADMIN.NO
-              validate:
-                type: bool
-
-            twig.umask_fix:
-              type: toggle
-              label: PLUGIN_ADMIN.TWIG_UMASK_FIX
-              help: PLUGIN_ADMIN.TWIG_UMASK_FIX_HELP
-              highlight: 0
               options:
                 1: PLUGIN_ADMIN.YES
                 0: PLUGIN_ADMIN.NO
@@ -1217,6 +1417,24 @@ form:
               validate:
                 type: bool
 
+            debugger.token:
+              type: text
+              size: medium
+              label: PLUGIN_ADMIN.DEBUGGER_TOKEN
+              help: PLUGIN_ADMIN.DEBUGGER_TOKEN_HELP
+              autocomplete: 'off'
+
+            debugger.flex_render_hints:
+              type: toggle
+              label: PLUGIN_ADMIN.DEBUGGER_FLEX_RENDER_HINTS
+              help: PLUGIN_ADMIN.DEBUGGER_FLEX_RENDER_HINTS_HELP
+              highlight: 0
+              options:
+                1: PLUGIN_ADMIN.YES
+                0: PLUGIN_ADMIN.NO
+              validate:
+                type: bool
+
             debugger.shutdown.close_connection:
               type: toggle
               label: PLUGIN_ADMIN.SHUTDOWN_CLOSE_CONNECTION
@@ -1238,6 +1456,16 @@ form:
               title: PLUGIN_ADMIN.MEDIA
               underline: true
 
+            images.adapter:
+              type: select
+              size: small
+              label: PLUGIN_ADMIN.IMAGE_ADAPTER
+              help: PLUGIN_ADMIN.IMAGE_ADAPTER_HELP
+              highlight: gd
+              options:
+                  gd: GD (PHP built-in)
+                  imagick: Imagick
+
             images.default_image_quality:
               type: range
               append: '%'
@@ -1246,6 +1474,17 @@ form:
               validate:
                 min: 1
                 max: 100
+
+            images.progressive_jpeg:
+              type: toggle
+              label: PLUGIN_ADMIN.IMAGES_PROGRESSIVE_JPEG
+              help: PLUGIN_ADMIN.IMAGES_PROGRESSIVE_JPEG_HELP
+              highlight: 1
+              options:
+                1: PLUGIN_ADMIN.YES
+                0: PLUGIN_ADMIN.NO
+              validate:
+                type: bool
 
             images.cache_all:
               type: toggle
@@ -1263,7 +1502,7 @@ form:
               size: small
               label: PLUGIN_ADMIN.CACHE_PERMS
               help: PLUGIN_ADMIN.CACHE_PERMS_HELP
-              highlight: '0755'
+              highlight: '0775'
               options:
                 '0755': '0755'
                 '0775': '0775'
@@ -1289,6 +1528,26 @@ form:
                 0: PLUGIN_ADMIN.NO
               validate:
                 type: bool
+
+            images.url_actions:
+              type: toggle
+              label: PLUGIN_ADMIN.IMAGES_URL_ACTIONS
+              help: PLUGIN_ADMIN.IMAGES_URL_ACTIONS_HELP
+              highlight: 0
+              options:
+                1: PLUGIN_ADMIN.YES
+                0: PLUGIN_ADMIN.NO
+              validate:
+                type: bool
+
+            images.max_pixels:
+              type: text
+              size: small
+              label: PLUGIN_ADMIN.IMAGES_MAX_PIXELS
+              help: PLUGIN_ADMIN.IMAGES_MAX_PIXELS_HELP
+              validate:
+                type: int
+                min: 0
 
             images.defaults.loading:
               type: select
@@ -1672,6 +1931,26 @@ form:
               label: PLUGIN_ADMIN.PWD_REGEX
               help: PLUGIN_ADMIN.PWD_REGEX_HELP
 
+            pwd_rules:
+              type: list
+              label: PLUGIN_ADMIN.PWD_RULES
+              help: PLUGIN_ADMIN.PWD_RULES_HELP
+              style: vertical
+              collapsed: true
+              fields:
+                .id:
+                  type: text
+                  label: PLUGIN_ADMIN.PWD_RULES_ID
+                  size: small
+                .label:
+                  type: text
+                  label: PLUGIN_ADMIN.PWD_RULES_LABEL
+                  size: medium
+                .pattern:
+                  type: text
+                  label: PLUGIN_ADMIN.PWD_RULES_PATTERN
+                  size: medium
+
             intl_enabled:
               type: toggle
               label: PLUGIN_ADMIN.INTL_ENABLED
@@ -1748,9 +2027,10 @@ form:
 
             http_x_forwarded.protocol:
               type: toggle
-              label: HTTP_X_FORWARDED_PROTO Enabled
-              highlight: 1
-              default: 1
+              label: PLUGIN_ADMIN.HTTP_X_FORWARDED_PROTO_ENABLED
+              help: PLUGIN_ADMIN.HTTP_X_FORWARDED_PROTO_HELP
+              highlight: 0
+              default: 0
               options:
                 1: PLUGIN_ADMIN.YES
                 0: PLUGIN_ADMIN.NO
@@ -1759,7 +2039,8 @@ form:
 
             http_x_forwarded.host:
               type: toggle
-              label: HTTP_X_FORWARDED_HOST Enabled
+              label: PLUGIN_ADMIN.HTTP_X_FORWARDED_HOST_ENABLED
+              help: PLUGIN_ADMIN.HTTP_X_FORWARDED_HOST_HELP
               highlight: 0
               default: 0
               options:
@@ -1770,9 +2051,10 @@ form:
 
             http_x_forwarded.port:
               type: toggle
-              label: HTTP_X_FORWARDED_PORT Enabled
-              highlight: 1
-              default: 1
+              label: PLUGIN_ADMIN.HTTP_X_FORWARDED_PORT_ENABLED
+              help: PLUGIN_ADMIN.HTTP_X_FORWARDED_PORT_HELP
+              highlight: 0
+              default: 0
               options:
                 1: PLUGIN_ADMIN.YES
                 0: PLUGIN_ADMIN.NO
@@ -1781,9 +2063,34 @@ form:
 
             http_x_forwarded.ip:
               type: toggle
-              label: HTTP_X_FORWARDED IP Enabled
-              highlight: 1
-              default: 1
+              label: PLUGIN_ADMIN.HTTP_X_FORWARDED_IP_ENABLED
+              help: PLUGIN_ADMIN.HTTP_X_FORWARDED_IP_HELP
+              highlight: 0
+              default: 0
+              options:
+                1: PLUGIN_ADMIN.YES
+                0: PLUGIN_ADMIN.NO
+              validate:
+                type: bool
+
+            http_x_forwarded.client_ip:
+              type: toggle
+              label: PLUGIN_ADMIN.HTTP_CLIENT_IP_ENABLED
+              help: PLUGIN_ADMIN.HTTP_CLIENT_IP_HELP
+              highlight: 0
+              default: 0
+              options:
+                1: PLUGIN_ADMIN.YES
+                0: PLUGIN_ADMIN.NO
+              validate:
+                type: bool
+
+            http_x_forwarded.cf_connecting_ip:
+              type: toggle
+              label: PLUGIN_ADMIN.HTTP_CF_CONNECTING_IP_ENABLED
+              help: PLUGIN_ADMIN.HTTP_CF_CONNECTING_IP_HELP
+              highlight: 0
+              default: 0
               options:
                 1: PLUGIN_ADMIN.YES
                 0: PLUGIN_ADMIN.NO
@@ -1794,8 +2101,8 @@ form:
             strict_mode.blueprint_compat:
               type: toggle
               label: PLUGIN_ADMIN.STRICT_BLUEPRINT_COMPAT
-              highlight: 0
-              default: 0
+              highlight: 1
+              default: 1
               help: PLUGIN_ADMIN.STRICT_BLUEPRINT_COMPAT_HELP
               options:
                 1: PLUGIN_ADMIN.YES
@@ -1815,12 +2122,24 @@ form:
               validate:
                 type: bool
 
-            strict_mode.twig_compat:
+            strict_mode.twig2_compat:
               type: toggle
               label: PLUGIN_ADMIN.STRICT_TWIG_COMPAT
               highlight: 0
               default: 0
               help: PLUGIN_ADMIN.STRICT_TWIG_COMPAT_HELP
+              options:
+                1: PLUGIN_ADMIN.YES
+                0: PLUGIN_ADMIN.NO
+              validate:
+                type: bool
+
+            strict_mode.twig3_compat:
+              type: toggle
+              label: PLUGIN_ADMIN.TWIG_3_COMPATIBILITY
+              highlight: 0
+              default: 0
+              help: PLUGIN_ADMIN.TWIG_3_COMPATIBILITY_HELP
               options:
                 1: PLUGIN_ADMIN.YES
                 0: PLUGIN_ADMIN.NO
@@ -1835,7 +2154,7 @@ form:
           fields:
             flex_accounts:
               type: section
-              title: User Accounts
+              title: PLUGIN_ADMIN.USER_ACCOUNTS
 
             accounts.type:
               type: select
@@ -1889,6 +2208,3 @@ form:
 #
 #            pages.type:
 #              type: hidden
-
-
-

@@ -4,11 +4,12 @@ use Codeception\Util\Fixtures;
 use Grav\Common\Grav;
 use Grav\Common\Uri;
 use Grav\Common\Utils;
+use RocketTheme\Toolbox\ResourceLocator\UniformResourceLocator;
 
 /**
  * Class UtilsTest
  */
-class UtilsTest extends \Codeception\TestCase\Test
+class UtilsTest extends \PHPUnit\Framework\TestCase
 {
     /** @var Grav $grav */
     protected $grav;
@@ -16,14 +17,15 @@ class UtilsTest extends \Codeception\TestCase\Test
     /** @var Uri $uri */
     protected $uri;
 
-    protected function _before(): void
+    protected function setUp(): void
     {
+        parent::setUp();
         $grav = Fixtures::get('grav');
         $this->grav = $grav();
         $this->uri = $this->grav['uri'];
     }
 
-    protected function _after(): void
+    protected function tearDown(): void
     {
     }
 
@@ -131,8 +133,8 @@ class UtilsTest extends \Codeception\TestCase\Test
 
         $objMerged = Utils::mergeObjects($obj1, $obj2);
 
-        self::arrayHasKey('test1', (array) $objMerged);
-        self::arrayHasKey('test2', (array) $objMerged);
+        self::assertArrayHasKey('test1', (array) $objMerged);
+        self::assertArrayHasKey('test2', (array) $objMerged);
     }
 
     public function testDateFormats(): void
@@ -219,6 +221,21 @@ class UtilsTest extends \Codeception\TestCase\Test
         self::assertEquals('text/html', Utils::getMimeByExtension('foo', 'text/html'));
     }
 
+    public function testGetMimeByExtensionHonoursMediaTypesOverride(): void
+    {
+        $config = $this->grav['config'];
+        $original = $config->get('media.types.rss');
+
+        // A site can change the type served for an output format in its own media.yaml,
+        // for example application/xml so an RSS feed can be styled with XSLT (#3735).
+        $config->set('media.types.rss.mime', 'application/xml');
+        self::assertEquals('application/xml', Utils::getMimeByExtension('rss'));
+        self::assertEquals('application/xml', Utils::getMimeByExtension('RSS'));
+
+        $config->set('media.types.rss', $original);
+        self::assertEquals('application/rss+xml', Utils::getMimeByExtension('rss'));
+    }
+
     public function testGetExtensionByMime(): void
     {
         self::assertEquals('html', Utils::getExtensionByMime('*/*'));
@@ -281,9 +298,7 @@ class UtilsTest extends \Codeception\TestCase\Test
             'test2' => 'test2'
         ];
 
-        $array = Utils::arrayFilterRecursive($array, function ($k, $v) {
-            return !(is_null($v) || $v === '');
-        });
+        $array = Utils::arrayFilterRecursive($array, fn($k, $v) => !(is_null($v) || $v === ''));
 
         self::assertContainsOnly('string', $array);
         self::assertArrayNotHasKey('test', $array);
@@ -316,6 +331,32 @@ class UtilsTest extends \Codeception\TestCase\Test
         $timestamp = strtotime('10 September 2000');
         self::assertSame($timestamp, Utils::date2timestamp('10 September 2000'));
         self::assertSame($timestamp, Utils::date2timestamp('2000-09-10 00:00:00'));
+    }
+
+    public function testDate2timestampWithNonStringDate(): void
+    {
+        // An unquoted YAML date header such as `date: 2000-09-10` never reaches
+        // us as a string: the YAML parser reads it as a date and hands over a
+        // Unix timestamp, which strtotime() then misreads as a year in the far
+        // future. Accept these directly instead. Fixes #3812.
+        $timestamp = (new DateTime('2000-09-10 00:00:00'))->getTimestamp();
+
+        self::assertSame($timestamp, Utils::date2timestamp($timestamp));
+        self::assertSame($timestamp, Utils::date2timestamp((float) $timestamp));
+        self::assertSame($timestamp, Utils::date2timestamp(new DateTime('2000-09-10 00:00:00')));
+        self::assertSame($timestamp, Utils::date2timestamp(new DateTimeImmutable('2000-09-10 00:00:00')));
+    }
+
+    public function testDate2timestampKeepsReadingBareNumericDates(): void
+    {
+        // `date: 20000910` is also an int by the time it arrives, but it is the
+        // number the author typed rather than a timestamp, and it has always
+        // been read correctly as a date. Treating every int as a timestamp
+        // would silently move these pages to 1970.
+        $timestamp = (new DateTime('2000-09-10 00:00:00'))->getTimestamp();
+
+        self::assertSame($timestamp, Utils::date2timestamp(20000910));
+        self::assertSame($timestamp, Utils::date2timestamp('20000910'));
     }
 
     public function testResolve(): void
@@ -540,6 +581,106 @@ class UtilsTest extends \Codeception\TestCase\Test
         // self::assertSame('mailto:joe@domain.com', Utils::url('mailto:joe@domain.com', true)); // FIXME <-
     }
 
+
+    /**
+     * The root-stripping used to run an unanchored regex, so any path containing a segment equal to the install
+     * folder had that segment cut out of the middle: `/images/subdir/foo.png` came back `/subdir/imagesfoo.png`.
+     */
+    public function testUrlWithRootDoesNotStripMatchingSegmentFromTheMiddle(): void
+    {
+        $this->uri->initializeWithUrlAndRootPath('http://testing.dev/subdir/path1/path2', '/subdir')->init();
+
+        self::assertSame('/subdir/images/subdir/foo.png', Utils::url('/images/subdir/foo.png'));
+        self::assertSame('/subdir/path1/subdir', Utils::url('/path1/subdir'));
+        self::assertSame('/subdir/a/subdir/b/subdir/c', Utils::url('/a/subdir/b/subdir/c'));
+
+        // The leading occurrence is still stripped, and only on a segment boundary.
+        self::assertSame('/subdir/path1', Utils::url('/subdir/path1'));
+        self::assertSame('/subdir/subdir2/sub', Utils::url('/subdir2/sub'));
+    }
+
+    /**
+     * A page route carrying a query string or fragment used to miss the page lookup entirely and fall through to a
+     * raw path, losing both the language prefix and the configured url extension.
+     */
+    public function testUrlKeepsQueryAndFragmentWhilePageStillResolves(): void
+    {
+        $this->initPages();
+
+        // The fixture keeps `include_default_lang` on, so even `en` is prefixed.
+        self::assertSame('/en/blog', Utils::url('/blog'));
+        self::assertSame('/en/blog?page=2', Utils::url('/blog?page=2'));
+        self::assertSame('/en/blog#intro', Utils::url('/blog#intro'));
+        self::assertSame('/en/blog?page=2#intro', Utils::url('/blog?page=2#intro'));
+
+        // A non-page path is still passed through untouched.
+        self::assertSame('/not-a-page?page=2', Utils::url('/not-a-page?page=2'));
+    }
+
+    /**
+     * Page URLs carry the active language; asset-style paths deliberately do not, and `$lang` is the opt-in for
+     * the language-sensitive routes in between (plugin routes, form actions).
+     */
+    public function testUrlLanguageHandling(): void
+    {
+        $this->initPages('fr');
+
+        // Pages are language-aware on their own.
+        self::assertSame('/fr/blog', Utils::url('/blog'));
+        self::assertSame('/fr/blog?page=2', Utils::url('/blog?page=2'));
+
+        // Non-page paths stay language-neutral by default: this is the branch asset URLs go through.
+        self::assertSame('/user/themes/test/img.png', Utils::url('/user/themes/test/img.png'));
+        self::assertSame('/search', Utils::url('/search'));
+        self::assertSame('/search', Utils::url('/search', false, false, false));
+
+        // ...and opt in for routes that need it.
+        self::assertSame('/fr/search', Utils::url('/search', false, false, true));
+        self::assertSame('/vi/search', Utils::url('/search', false, false, 'vi'));
+        self::assertSame('/fr/search?q=x', Utils::url('/search?q=x', false, false, true));
+
+        // An explicit language switches the prefix on a resolved page too.
+        self::assertSame('/vi/blog', Utils::url('/blog', false, false, 'vi'));
+
+        // Streams are never language-prefixed, whatever is asked for.
+        self::assertSame('/user/does/not/exist', Utils::url('user://does/not/exist', false, true, 'vi'));
+
+        // Relative paths are resolved from the Grav root and never treated as routes.
+        self::assertSame('/blog', Utils::url('blog'));
+    }
+
+    /**
+     * On a subfolder install the page lookup used to run against the un-stripped path, so it never matched and
+     * every absolute link fell through to a raw path with no language prefix and no url extension.
+     */
+    public function testUrlResolvesPagesOnSubfolderInstall(): void
+    {
+        $this->uri->initializeWithUrlAndRootPath('http://testing.dev/subdir/blog', '/subdir')->init();
+        $this->initPages('fr');
+
+        self::assertSame('/subdir/fr/blog', Utils::url('/subdir/blog'));
+        self::assertSame('/subdir/fr/blog', Utils::url('/blog'));
+    }
+
+    /**
+     * Point the page stream at the simple-site fixture and build the index for the given language.
+     *
+     * @param string|null $lang
+     * @return void
+     */
+    protected function initPages($lang = null): void
+    {
+        /** @var UniformResourceLocator $locator */
+        $locator = $this->grav['locator'];
+        $locator->addPath('page', '', 'tests/fake/simple-site/user/pages', false);
+
+        if ($lang !== null) {
+            $this->grav['language']->setActive($lang);
+        }
+
+        $this->grav['pages']->init();
+    }
+
     public function testUrlWithStreams(): void
     {
     }
@@ -568,5 +709,13 @@ class UtilsTest extends \Codeception\TestCase\Test
         self::assertTrue(Utils::checkFilename('foo.xml'));
         self::assertTrue(Utils::checkFilename('foo.yaml'));
         self::assertTrue(Utils::checkFilename('foo.yml'));
+
+        // GHSA-76qg-8r9h-pxxr: HTML metacharacters in a filename are rejected so a
+        // stored filename cannot carry an XSS payload into the DOM.
+        self::assertFalse(Utils::checkFilename('<img src=x onerror=alert(1)>.png'));
+        self::assertFalse(Utils::checkFilename('foo">bar.png'));
+        self::assertFalse(Utils::checkFilename('a<b.png'));
+        // `'` stays allowed — common in legitimate names, not a tag-breakout char.
+        self::assertTrue(Utils::checkFilename("Bob's photo.png"));
     }
 }

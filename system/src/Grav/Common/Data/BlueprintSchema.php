@@ -3,7 +3,7 @@
 /**
  * @package    Grav\Common\Data
  *
- * @copyright  Copyright (c) 2015 - 2025 Trilby Media, LLC. All rights reserved.
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
  * @license    MIT License; see LICENSE file for details.
  */
 
@@ -130,7 +130,7 @@ class BlueprintSchema extends BlueprintSchemaBase implements ExportInterface
             foreach ($items as $key => $rules) {
                 $type = $rules['type'] ?? '';
                 $ignore = (bool) array_filter((array)($rules['validate']['ignore'] ?? [])) ?? false;
-                if (!str_starts_with($type, '_') && !str_contains($key, '*') && $ignore !== true) {
+                if (!str_starts_with((string) $type, '_') && !str_contains((string) $key, '*') && $ignore !== true) {
                     $list[$prefix . $key] = null;
                 }
             }
@@ -196,6 +196,38 @@ class BlueprintSchema extends BlueprintSchemaBase implements ExportInterface
 
                 $messages += Validation::validate($child, $rule);
 
+                if (isset($rule['validate']['match']) || isset($rule['validate']['match_exact']) || isset($rule['validate']['match_any'])) {
+                    $ruleKey = current(array_intersect(['match', 'match_exact', 'match_any'], array_keys($rule['validate'])));
+                    $otherKey = $rule['validate'][$ruleKey] ?? null;
+                    $otherVal = $data[$otherKey] ?? null;
+                    $otherLabel = $this->items[$otherKey]['label'] ?? $otherKey;
+                    $currentVal = $data[$key] ?? null;
+                    $currentLabel = $this->items[$key]['label'] ?? $key;
+
+                    // Determine comparison type (loose, strict, substring)
+                    // Perform comparison:
+                    $isValid = false;
+                    if ($ruleKey === 'match') {
+                        $isValid = ($currentVal == $otherVal);
+                    } elseif ($ruleKey === 'match_exact') {
+                        $isValid = ($currentVal === $otherVal);
+                    } elseif ($ruleKey === 'match_any') {
+                        // If strings:
+                        if (is_string($currentVal) && is_string($otherVal)) {
+                            $isValid = (strlen($currentVal) && strlen($otherVal) && (str_contains($currentVal,
+                                        $otherVal) || str_contains($otherVal, $currentVal)));
+                        }
+                        // If arrays:
+                        if (is_array($currentVal) && is_array($otherVal)) {
+                            $common = array_intersect($currentVal, $otherVal);
+                            $isValid = !empty($common);
+                        }
+                    }
+                    if (!$isValid) {
+                        $messages[$rule['name']][] = sprintf(Grav::instance()['language']->translate('PLUGIN_FORM.VALIDATION_MATCH'), $currentLabel, $otherLabel);
+                    }
+                }
+
             } elseif (is_array($child) && is_array($val)) {
                 // Array has been defined in blueprints.
                 $messages += $this->validateArray($child, $val, $strict);
@@ -240,6 +272,26 @@ class BlueprintSchema extends BlueprintSchemaBase implements ExportInterface
                 // Skip any data in the ignored field.
                 unset($results[$key]);
                 continue;
+            }
+
+            // A well-formed submission nests its data; a flat dot-notation key such as
+            // `access.admin.super` only appears when a caller tries to address a child
+            // path directly. The guard above is keyed on a field's own path, so a flat
+            // key resolves to no rule at all and slips past it, and FlexObject::update()
+            // then expands it again via setNestedProperty(), writing straight into a
+            // subtree the blueprint disabled or gated with `security@`. Drop the key
+            // when any ancestor path is disabled or ignored, so the per-field guard
+            // holds whichever shape the data arrives in. (GHSA-mwjj-r7vm-pgqm)
+            if (null === $rule && str_contains($key, '.')) {
+                $ancestor = $key;
+                while (false !== $pos = strrpos($ancestor, '.')) {
+                    $ancestor = substr($ancestor, 0, $pos);
+                    $item = $this->items[$parent . $ancestor] ?? null;
+                    if (!empty($item['disabled']) || !empty($item['validate']['ignore'])) {
+                        unset($results[$key]);
+                        continue 2;
+                    }
+                }
             }
 
             if (null === $field) {

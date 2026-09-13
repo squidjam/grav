@@ -3,7 +3,7 @@
 /**
  * @package    Grav\Common\Media
  *
- * @copyright  Copyright (c) 2015 - 2025 Trilby Media, LLC. All rights reserved.
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
  * @license    MIT License; see LICENSE file for details.
  */
 
@@ -19,6 +19,7 @@ use function array_key_exists;
 use function extension_loaded;
 use function func_num_args;
 use function function_exists;
+use function in_array;
 
 /**
  * Trait ImageMediaTrait
@@ -52,6 +53,12 @@ trait ImageMediaTrait
 
     /** @var bool */
     protected $watermark;
+
+    /** @var bool */
+    protected $progressive;
+
+    /** @var bool Whether anything is queued that changes the image's pixels, format or quality */
+    protected $transformed = false;
 
     /** @var array */
     public static $magic_actions = [
@@ -97,7 +104,7 @@ trait ImageMediaTrait
         }
 
         $basename = $this->get('basename');
-        if (preg_match('/[a-z0-9]{40}-(.*)/', $basename, $matches)) {
+        if (preg_match('/[a-z0-9]{40}-(.*)/', (string) $basename, $matches)) {
             $basename = $matches[1];
         }
         return $basename;
@@ -212,6 +219,7 @@ trait ImageMediaTrait
                 $this->image();
             }
 
+            $this->transformed = true;
             $this->quality = $quality;
 
             return $this;
@@ -232,6 +240,7 @@ trait ImageMediaTrait
             $this->image();
         }
 
+        $this->transformed = true;
         $this->format = $format;
 
         return $this;
@@ -353,8 +362,12 @@ trait ImageMediaTrait
         // Use existing cache folder or if it doesn't exist, create it.
         $cacheDir = $locator->findResource('cache://images', true) ?: $locator->findResource('cache://images', true, true);
 
-        // Make sure we free previous image.
-        unset($this->image);
+        // Make sure we free previous image. Assign null rather than unset(): unset()
+        // removes the declared property, and every later write then falls through to
+        // Data's __set() and lands in $items['image'], overwriting the media type's
+        // own `image` settings with the ImageFile object. That is what silently
+        // killed the default filters in 1.4.6. getgrav/grav#4284.
+        $this->image = null;
 
         /** @var MediaCollectionInterface $media */
         $media = $this->get('media');
@@ -382,6 +395,7 @@ trait ImageMediaTrait
         $this->retina_scale = $config->get('system.images.cls.retina_scale', 1);
 
         $this->watermark = $config->get('system.images.watermark.watermark_all', false);
+        $this->progressive = $config->get('system.images.progressive_jpeg', true);
 
         return $this;
     }
@@ -405,7 +419,9 @@ trait ImageMediaTrait
 
         if ($this->format === 'guess') {
             $extension = strtolower($this->get('extension'));
-            $this->format($extension);
+            // Assigned directly: format() records a transformation, and keeping
+            // the original's own format is not one.
+            $this->format = $extension;
         }
 
         if (!$this->debug_watermarked && $this->get('debug')) {
@@ -421,6 +437,14 @@ trait ImageMediaTrait
 
         if ($this->watermark) {
             $this->watermark();
+        }
+
+        // Queued last on purpose: GD keeps the interlace flag on the image resource,
+        // and any operation that builds a new resource (a resize) drops it. Checked
+        // against the resolved output format so a JPEG converted to PNG or WebP is
+        // not interlaced along with it. getgrav/grav#4284.
+        if ($this->progressive && in_array($this->format, ['jpg', 'jpeg'], true)) {
+            $this->image->enableProgressive();
         }
 
         return $this->image->cacheFile($this->format, $this->quality, false, [$this->get('width'), $this->get('height'), $this->get('modified')]);

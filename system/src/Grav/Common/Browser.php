@@ -3,7 +3,7 @@
 /**
  * @package    Grav\Common
  *
- * @copyright  Copyright (c) 2015 - 2025 Trilby Media, LLC. All rights reserved.
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
  * @license    MIT License; see LICENSE file for details.
  */
 
@@ -27,7 +27,7 @@ class Browser
     {
         try {
             $this->useragent = parse_user_agent();
-        } catch (InvalidArgumentException $e) {
+        } catch (InvalidArgumentException) {
             $this->useragent = parse_user_agent("Mozilla/5.0 (compatible; Unknown;)");
         }
     }
@@ -58,7 +58,7 @@ class Browser
      */
     public function getBrowser()
     {
-        return strtolower($this->useragent['browser']);
+        return strtolower($this->useragent['browser'] ?? '');
     }
 
     /**
@@ -96,7 +96,7 @@ class Browser
      */
     public function getPlatform()
     {
-        return strtolower($this->useragent['platform']);
+        return strtolower($this->useragent['platform'] ?? '');
     }
 
     /**
@@ -106,7 +106,7 @@ class Browser
      */
     public function getLongVersion()
     {
-        return $this->useragent['version'];
+        return $this->useragent['version'] ?? '';
     }
 
     /**

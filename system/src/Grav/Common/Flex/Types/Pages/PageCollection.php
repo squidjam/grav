@@ -5,7 +5,7 @@ declare(strict_types=1);
 /**
  * @package    Grav\Common\Flex
  *
- * @copyright  Copyright (c) 2015 - 2025 Trilby Media, LLC. All rights reserved.
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
  * @license    MIT License; see LICENSE file for details.
  */
 
@@ -93,6 +93,7 @@ class PageCollection extends FlexPageCollection implements PageCollectionInterfa
                 'nonRoutable' => true,
                 'ofType' => true,
                 'ofOneOfTheseTypes' => true,
+                'notOfType' => true,
                 'ofOneOfTheseAccessLevels' => true,
                 'withOrdered' => true,
                 'withModules' => true,
@@ -172,7 +173,7 @@ class PageCollection extends FlexPageCollection implements PageCollectionInterfa
      * @return static
      * @phpstan-return static<T>
      */
-    public function merge(PageCollectionInterface $collection)
+    public function merge(PageCollectionInterface $collection): never
     {
         throw new RuntimeException(__METHOD__ . '(): Not Implemented');
     }
@@ -184,7 +185,7 @@ class PageCollection extends FlexPageCollection implements PageCollectionInterfa
      * @return static
      * @phpstan-return static<T>
      */
-    public function intersect(PageCollectionInterface $collection)
+    public function intersect(PageCollectionInterface $collection): never
     {
         throw new RuntimeException(__METHOD__ . '(): Not Implemented');
     }
@@ -242,7 +243,7 @@ class PageCollection extends FlexPageCollection implements PageCollectionInterfa
      * @return static
      * @phpstan-return static<T>
      */
-    public function append($items)
+    public function append($items): never
     {
         throw new RuntimeException(__METHOD__ . '(): Not Implemented');
     }
@@ -303,7 +304,7 @@ class PageCollection extends FlexPageCollection implements PageCollectionInterfa
         // do this header query work only once
         $header_query = null;
         $header_default = null;
-        if (strpos($order_by, 'header.') === 0) {
+        if (str_starts_with($order_by, 'header.')) {
             $query = explode('|', str_replace('header.', '', $order_by), 2);
             $header_query = array_shift($query) ?? '';
             $header_default = array_shift($query);
@@ -373,9 +374,7 @@ class PageCollection extends FlexPageCollection implements PageCollectionInterfa
             if ($col) {
                 $col->setAttribute(Collator::NUMERIC_COLLATION, Collator::ON);
                 if (($sort_flags & SORT_NATURAL) === SORT_NATURAL) {
-                    $list = preg_replace_callback('~([0-9]+)\.~', static function ($number) {
-                        return sprintf('%032d.', $number[0]);
-                    }, $list);
+                    $list = preg_replace_callback('~([0-9]+)\.~', static fn($number) => sprintf('%032d.', $number[0]), $list);
                     if (!is_array($list)) {
                         throw new RuntimeException('Internal Error');
                     }
@@ -457,7 +456,7 @@ class PageCollection extends FlexPageCollection implements PageCollectionInterfa
                 continue;
             }
 
-            $date = $field ? strtotime($object->getNestedProperty($field)) : $object->date();
+            $date = $field ? strtotime((string) $object->getNestedProperty($field)) : $object->date();
 
             if ((!$start || $date >= $start) && (!$end || $date <= $end)) {
                 $entries[$key] = $object;
@@ -680,6 +679,26 @@ class PageCollection extends FlexPageCollection implements PageCollectionInterfa
     }
 
     /**
+     * Creates new collection excluding pages of the specified type(s)
+     *
+     * @param string|string[] $type
+     * @return static The collection
+     * @phpstan-return static<T>
+     */
+    public function notOfType($type)
+    {
+        $entries = [];
+        $types = (array) $type;
+        foreach ($this as $key => $object) {
+            if ($object && !in_array($object->template(), $types, true)) {
+                $entries[$key] = $object;
+            }
+        }
+
+        return $this->createFrom($entries);
+    }
+
+    /**
      * Creates new collection with only pages of one of the specified access levels
      *
      * @param array $accessLevels
@@ -766,7 +785,7 @@ class PageCollection extends FlexPageCollection implements PageCollectionInterfa
      * @return static
      * @phpstan-return static<T>
      */
-    public function withTranslation(bool $bool = true, string $languageCode = null, bool $fallback = null)
+    public function withTranslation(bool $bool = true, ?string $languageCode = null, ?bool $fallback = null)
     {
         $list = array_keys(array_filter($this->call('hasTranslation', [$languageCode, $fallback])));
 
@@ -778,7 +797,7 @@ class PageCollection extends FlexPageCollection implements PageCollectionInterfa
      * @param bool|null $fallback
      * @return PageIndex
      */
-    public function withTranslated(string $languageCode = null, bool $fallback = null)
+    public function withTranslated(?string $languageCode = null, ?bool $fallback = null)
     {
         return $this->getIndex()->withTranslated($languageCode, $fallback);
     }

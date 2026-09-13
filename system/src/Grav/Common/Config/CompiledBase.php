@@ -3,7 +3,7 @@
 /**
  * @package    Grav\Common\Config
  *
- * @copyright  Copyright (c) 2015 - 2025 Trilby Media, LLC. All rights reserved.
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
  * @license    MIT License; see LICENSE file for details.
  */
 
@@ -11,9 +11,14 @@ namespace Grav\Common\Config;
 
 use BadMethodCallException;
 use Exception;
+use Grav\Common\Grav;
 use RocketTheme\Toolbox\File\PhpFile;
 use RuntimeException;
+use Throwable;
+use function filter_var;
+use function function_exists;
 use function get_class;
+use function ini_get;
 use function is_array;
 
 /**
@@ -202,7 +207,7 @@ abstract class CompiledBase
         $cache = include $filename;
         if (!is_array($cache)
             || !isset($cache['checksum'], $cache['data'], $cache['@class'])
-            || $cache['@class'] !== get_class($this)
+            || $cache['@class'] !== static::class
         ) {
             return false;
         }
@@ -225,7 +230,6 @@ abstract class CompiledBase
      *
      * @param  string  $filename
      * @return void
-     * @throws RuntimeException
      * @internal
      */
     protected function saveCompiledFile($filename)
@@ -235,7 +239,7 @@ abstract class CompiledBase
         // Attempt to lock the file for writing.
         try {
             $file->lock(false);
-        } catch (Exception $e) {
+        } catch (Exception) {
             // Another process has locked the file; we will check this in a bit.
         }
 
@@ -245,18 +249,80 @@ abstract class CompiledBase
         }
 
         $cache = [
-            '@class' => get_class($this),
+            '@class' => static::class,
             'timestamp' => time(),
             'checksum' => $this->checksum(),
             'files' => $this->files,
             'data' => $this->getState()
         ];
 
-        $file->save($cache);
-        $file->unlock();
-        $file->free();
+        // The compiled file is a cache and can always be rebuilt from the source
+        // YAML. If it cannot be written we serve the request from the freshly
+        // parsed files instead of taking the whole site down: this runs during
+        // config init, before the logger, the error handler and the Problems
+        // plugin exist, so an exception here 500s every route including /admin
+        // and leaves no in-browser way back. (#4260)
+        try {
+            $file->save($cache);
+            $file->unlock();
 
-        $this->modified();
+            $this->preloadOpcodeCache($file);
+
+            $file->free();
+
+            $this->modified();
+        } catch (Throwable $e) {
+            static::logCacheWriteFailure($filename, $e->getMessage());
+
+            $file->unlock();
+            $file->free();
+        }
+    }
+
+    /**
+     * Record that a compiled cache file could not be written and that the request
+     * is being served uncached.
+     *
+     * Degrading is the right behaviour, but doing it silently hides what is
+     * almost always a directory permission problem, so name the directory and say
+     * what is wrong with it. The logger is resolved defensively and the whole
+     * call is guarded, so reporting a degraded cache can never itself become the
+     * fatal we are recovering from.
+     *
+     * @param string $filename Cache file that could not be written.
+     * @param string $reason   Failure reported by the writer.
+     * @return void
+     */
+    public static function logCacheWriteFailure(string $filename, string $reason): void
+    {
+        $dir = dirname($filename);
+        if (!is_dir($dir)) {
+            $hint = sprintf('the directory %s does not exist', $dir);
+        } elseif (!is_writable($dir)) {
+            $hint = sprintf('the directory %s is not writable by the web server user', $dir);
+        } else {
+            $hint = sprintf('the directory %s is writable, so the file itself may be owned by another user', $dir);
+        }
+
+        $message = sprintf(
+            'Could not write compiled cache %s (%s) - %s. Serving this request uncached.',
+            $filename,
+            $reason,
+            $hint
+        );
+
+        try {
+            $log = Grav::instance()['log'] ?? null;
+            if ($log) {
+                $log->warning($message);
+
+                return;
+            }
+        } catch (Throwable) {
+            // Logging is best-effort: never let it mask the recovery it reports.
+        }
+
+        error_log('Grav: ' . $message);
     }
 
     /**
@@ -265,5 +331,41 @@ abstract class CompiledBase
     protected function getState()
     {
         return $this->object->toArray();
+    }
+
+    /**
+     * Ensure compiled cache file is primed into OPcache when available.
+     */
+    protected function preloadOpcodeCache(PhpFile $file): void
+    {
+        if (!function_exists('opcache_invalidate') || !$this->isOpcacheEnabled()) {
+            return;
+        }
+
+        $filename = $file->filename();
+        if (!$filename) {
+            return;
+        }
+
+        // Silence errors for restricted functions while keeping best effort behavior.
+        @opcache_invalidate($filename, true);
+
+        if (function_exists('opcache_compile_file')) {
+            @opcache_compile_file($filename);
+        }
+    }
+
+    /**
+     * Detect if OPcache is active for current SAPI.
+     */
+    protected function isOpcacheEnabled(): bool
+    {
+        $enabled = filter_var(ini_get('opcache.enable'), \FILTER_VALIDATE_BOOLEAN);
+
+        if (PHP_SAPI === 'cli') {
+            $enabled = $enabled || filter_var(ini_get('opcache.enable_cli'), \FILTER_VALIDATE_BOOLEAN);
+        }
+
+        return $enabled;
     }
 }

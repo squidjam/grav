@@ -3,7 +3,7 @@
 /**
  * @package    Grav\Console\Gpm
  *
- * @copyright  Copyright (c) 2015 - 2025 Trilby Media, LLC. All rights reserved.
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
  * @license    MIT License; see LICENSE file for details.
  */
 
@@ -203,6 +203,13 @@ class UninstallCommand extends GpmCommand
                 }
 
                 $dependencyPackage = $this->gpm->findPackage($dependency);
+
+                // Same false-not-null return as the install path: a dependency
+                // missing from the index would otherwise reach packageExists()
+                // and have its `package_type` read off a bool.
+                if (!$dependencyPackage) {
+                    continue;
+                }
 
                 $dependency_exists = $this->packageExists($dependency, $dependencyPackage);
 

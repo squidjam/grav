@@ -3,7 +3,7 @@
 /**
  * @package    Grav\Common\Filesystem
  *
- * @copyright  Copyright (c) 2015 - 2025 Trilby Media, LLC. All rights reserved.
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
  * @license    MIT License; see LICENSE file for details.
  */
 
@@ -57,14 +57,51 @@ class RecursiveDirectoryFilterIterator extends RecursiveFilterIterator
         $relative_filename = str_replace($this::$root . '/', '', $file->getPathname());
 
         if ($file->isDir()) {
+            // Check if the directory path is in the ignore list
             if (in_array($relative_filename, $this::$ignore_folders, true)) {
                 return false;
             }
-            if (!in_array($filename, $this::$ignore_files, true)) {
+            // Check if any parent directory is in the ignore list
+            foreach ($this::$ignore_folders as $ignore_folder) {
+                $ignore_folder = trim((string) $ignore_folder, '/');
+                if (str_starts_with($relative_filename, $ignore_folder . '/') || $relative_filename === $ignore_folder) {
+                    return false;
+                }
+            }
+            if (!$this->matchesPattern($filename, $this::$ignore_files)) {
                 return true;
             }
-        } elseif ($file->isFile() && !in_array($filename, $this::$ignore_files, true)) {
+        } elseif ($file->isFile() && !$this->matchesPattern($filename, $this::$ignore_files)) {
             return true;
+        }
+        return false;
+    }
+    
+    /**
+     * Check if filename matches any pattern in the list
+     *
+     * @param string $filename
+     * @param array $patterns
+     * @return bool
+     */
+    protected function matchesPattern($filename, $patterns)
+    {
+        foreach ($patterns as $pattern) {
+            // Check for exact match
+            if ($filename === $pattern) {
+                return true;
+            }
+            // Check for extension patterns like .pdf
+            if (str_starts_with((string) $pattern, '.') && str_ends_with($filename, (string) $pattern)) {
+                return true;
+            }
+            // Check for wildcard patterns
+            if (str_contains((string) $pattern, '*')) {
+                $regex = '/^' . str_replace('\\*', '.*', preg_quote((string) $pattern, '/')) . '$/';
+                if (preg_match($regex, $filename)) {
+                    return true;
+                }
+            }
         }
         return false;
     }

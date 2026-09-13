@@ -3,7 +3,7 @@
 /**
  * @package    Grav\Common\Service
  *
- * @copyright  Copyright (c) 2015 - 2025 Trilby Media, LLC. All rights reserved.
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
  * @license    MIT License; see LICENSE file for details.
  */
 
@@ -12,6 +12,7 @@ namespace Grav\Common\Service;
 use Grav\Common\Config\Config;
 use Grav\Common\Grav;
 use Grav\Common\Language\Language;
+use Grav\Common\Page\Markdown\MarkdownOutput;
 use Grav\Common\Page\Page;
 use Grav\Common\Page\Pages;
 use Grav\Common\Uri;
@@ -32,9 +33,8 @@ class PagesServiceProvider implements ServiceProviderInterface
      */
     public function register(Container $container)
     {
-        $container['pages'] = function (Grav $grav) {
-            return new Pages($grav);
-        };
+        $container['pages'] = fn(Grav $grav) => new Pages($grav);
+        $container['markdown_output'] = fn(Grav $grav) => new MarkdownOutput($grav);
 
         if (defined('GRAV_CLI')) {
             $container['page'] = static function (Grav $grav) {
@@ -62,19 +62,23 @@ class PagesServiceProvider implements ServiceProviderInterface
             $path = $uri->path() ? urldecode($uri->path()) : '/'; // Don't trim to support trailing slash default routes
             $page = $pages->dispatch($path);
 
+            // Runs before the found/not-found branch below so it covers the 404
+            // fallback and media fallback requests too (#3703). The host guard
+            // keeps an undetermined hostname from building `https:///path` (#3702).
+            if ($config->get('system.force_ssl')) {
+                $scheme = $uri->scheme(true);
+                $host = $uri->host();
+                if ($scheme !== 'https' && $host) {
+                    $url = 'https://' . $host . $uri->uri();
+                    $grav->redirect($url);
+                }
+            }
+
             // Redirection tests
             if ($page) {
                 // some debugger override logic
                 if ($page->debugger() === false) {
                     $grav['debugger']->enabled(false);
-                }
-
-                if ($config->get('system.force_ssl')) {
-                    $scheme = $uri->scheme(true);
-                    if ($scheme !== 'https') {
-                        $url = 'https://' . $uri->host() . $uri->uri();
-                        $grav->redirect($url);
-                    }
                 }
 
                 $route = $page->route();
@@ -112,7 +116,10 @@ class PagesServiceProvider implements ServiceProviderInterface
                         $uriExtension = $uri->extension();
                         $uriExtension = null !== $uriExtension ? '.' . $uriExtension : '';
 
-                        if ($route !== $path || ($pageExtension !== $uriExtension
+                        // `/index.<ext>` is how the home page is addressed in a format.
+                        $requested = $path === '/index' && $uriExtension !== '' && $page->home() ? '/' : $path;
+
+                        if ($route !== $requested || ($pageExtension !== $uriExtension
                                 && \in_array($pageExtension, ['', '.htm', '.html'], true)
                                 && \in_array($uriExtension, ['', '.htm', '.html'], true))) {
                             $grav->redirect($url, $redirectCode);

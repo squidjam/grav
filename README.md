@@ -12,7 +12,7 @@ The underlying architecture of Grav is designed to use well-established and _bes
 * [Markdown](https://en.wikipedia.org/wiki/Markdown): for easy content creation
 * [YAML](https://yaml.org): for simple configuration
 * [Parsedown](https://parsedown.org/): for fast Markdown and Markdown Extra support
-* [Doctrine Cache](https://www.doctrine-project.org/projects/doctrine-orm/en/latest/reference/caching.html): layer for performance
+* [Symfony Cache](https://symfony.com/doc/current/components/cache.html): backend layer for performance
 * [Pimple Dependency Injection Container](https://github.com/silexphp/Pimple): for extensibility and maintainability
 * [Symfony Event Dispatcher](https://symfony.com/doc/current/components/event_dispatcher/introduction.html): for plugin event handling
 * [Symfony Console](https://symfony.com/doc/current/components/console/introduction.html): for CLI interface
@@ -20,7 +20,7 @@ The underlying architecture of Grav is designed to use well-established and _bes
 
 # Requirements
 
-- PHP 7.3.6 or higher. Check the [required modules list](https://learn.getgrav.org/basics/requirements#php-requirements)
+- PHP 8.3 or higher. Check the [required modules list](https://learn.getgrav.org/basics/requirements#php-requirements)
 - Check the [Apache](https://learn.getgrav.org/basics/requirements#apache-requirements) or [IIS](https://learn.getgrav.org/basics/requirements#iis-requirements) requirements
 
 # Documentation
@@ -39,22 +39,22 @@ You can download a **ready-built** package from the [Downloads page on https://g
 
 You can create a new project with the latest **stable** Grav release with the following command:
 
-```
-$ composer create-project getgrav/grav ~/webroot/grav
+```bash
+composer create-project getgrav/grav ~/webroot/grav
 ```
 
 ### From GitHub
 
 1. Clone the Grav repository from [https://github.com/getgrav/grav]() to a folder in the webroot of your server, e.g. `~/webroot/grav`. Launch a **terminal** or **console** and navigate to the webroot folder:
-   ```
-   $ cd ~/webroot
-   $ git clone https://github.com/getgrav/grav.git
+   ```bash
+   cd ~/webroot
+   git clone https://github.com/getgrav/grav.git
    ```
 
 2. Install the **plugin** and **theme dependencies** by using the [Grav CLI application](https://learn.getgrav.org/advanced/grav-cli) `bin/grav`:
-   ```
-   $ cd ~/webroot/grav
-   $ bin/grav install
+   ```bash
+   cd ~/webroot/grav
+   bin/grav install
    ```
 
 Check out the [install procedures](https://learn.getgrav.org/basics/installation) for more information.
@@ -63,35 +63,40 @@ Check out the [install procedures](https://learn.getgrav.org/basics/installation
 
 You can download [plugins](https://getgrav.org/downloads/plugins) or [themes](https://getgrav.org/downloads/themes) manually from the appropriate tab on the [Downloads page on https://getgrav.org](https://getgrav.org/downloads), but the preferred solution is to use the [Grav Package Manager](https://learn.getgrav.org/advanced/grav-gpm) or `GPM`:
 
-```
-$ bin/gpm index
+```bash
+bin/gpm index
 ```
 
 This will display all the available plugins and then you can install one or more with:
 
-```
-$ bin/gpm install <plugin/theme>
+```bash
+bin/gpm install <plugin/theme>
 ```
 
 # Updating
 
 To update Grav you should use the [Grav Package Manager](https://learn.getgrav.org/advanced/grav-gpm) or `GPM`:
 
-```
-$ bin/gpm selfupgrade
+```bash
+bin/gpm selfupgrade
 ```
 
 To update plugins and themes:
 
-```
-$ bin/gpm update
+```bash
+bin/gpm update
 ```
 
 ## Upgrading from older version
 
+> **Migrating from Grav 1.x to Grav 2.0?** Grav 2.0 is a major release with a PHP 8.3+ baseline and a modernized core, and upgrading requires a dedicated migration — `bin/gpm selfupgrade` alone will not take you across the 1.x → 2.x boundary. Follow the step-by-step guide at **[getgrav.org/migrate-to-2](https://getgrav.org/migrate-to-2)** before running any upgrade command.
+
+Within a major version, `bin/gpm selfupgrade` handles point upgrades. The following guides cover in-place upgrades between minor releases of Grav 1.x:
+
+* [Upgrading to Grav 1.8](https://learn.getgrav.org/16/advanced/grav-development/grav-18-upgrade-guide)
 * [Upgrading to Grav 1.7](https://learn.getgrav.org/16/advanced/grav-development/grav-17-upgrade-guide)
 * [Upgrading to Grav 1.6](https://learn.getgrav.org/16/advanced/grav-development/grav-16-upgrade-guide)
-* [Upgrading from Grav <1.6](https://learn.getgrav.org/16/advanced/grav-development/grav-15-upgrade-guide)
+* [Upgrading from Grav before 1.6](https://learn.getgrav.org/16/advanced/grav-development/grav-15-upgrade-guide)
 
 # Contributing
 We appreciate any contribution to Grav, whether it is related to bugs, grammar, or simply a suggestion or improvement! Please refer to the [Contributing guide](CONTRIBUTING.md) for more guidance on this topic.

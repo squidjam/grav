@@ -3,18 +3,20 @@
 /**
  * @package    Grav\Common
  *
- * @copyright  Copyright (c) 2015 - 2025 Trilby Media, LLC. All rights reserved.
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
  * @license    MIT License; see LICENSE file for details.
  */
 
 namespace Grav\Common;
 
 use DateTime;
+use DateTimeInterface;
 use DateTimeZone;
 use Exception;
 use Grav\Common\Flex\Types\Pages\PageObject;
 use Grav\Common\Helpers\Truncator;
 use Grav\Common\Page\Interfaces\PageInterface;
+use Grav\Common\Page\Markdown\MarkdownOutput;
 use Grav\Common\Markdown\Parsedown;
 use Grav\Common\Markdown\ParsedownExtra;
 use Grav\Common\Page\Markdown\Excerpts;
@@ -37,7 +39,11 @@ use function in_array;
 use function is_array;
 use function is_callable;
 use function is_string;
+use function str_contains;
+use function str_starts_with;
+use function strcspn;
 use function strlen;
+use function substr;
 
 /**
  * Class Utils
@@ -56,11 +62,14 @@ abstract class Utils
      * Simple helper method to make getting a Grav URL easier
      *
      * @param string|object $input
-     * @param bool $domain
-     * @param bool $fail_gracefully
+     * @param bool $domain Include the hostname in the returned URL.
+     * @param bool $fail_gracefully Return a best-effort URL instead of `false` when the target cannot be resolved.
+     * @param string|bool|null $lang Language prefix for path input. `null`/`false` keeps the URL language-neutral,
+     *                               which is what asset URLs need; `true` uses the active language; a language code
+     *                               such as `'de'` uses that language. Streams and external URLs are never prefixed.
      * @return string|false
      */
-    public static function url($input, $domain = false, $fail_gracefully = false)
+    public static function url($input, $domain = false, $fail_gracefully = false, $lang = null)
     {
         if ((!is_string($input) && !is_callable([$input, '__toString'])) || !trim($input)) {
             if ($fail_gracefully) {
@@ -82,7 +91,8 @@ abstract class Utils
         $uri = $grav['uri'];
 
         $resource = false;
-        if (static::contains((string)$input, '://')) {
+        $prefix = '';
+        if (str_contains($input, '://')) {
             // Url contains a scheme (https:// , user:// etc).
             /** @var UniformResourceLocator $locator */
             $locator = $grav['locator'];
@@ -136,22 +146,39 @@ abstract class Utils
             }
         } else {
             // Just a path.
-            /** @var Pages $pages */
-            $pages = $grav['pages'];
-
-            // Is this a page?
-            $page = $pages->find($input, true);
-            if ($page && $page->routable()) {
-                return $page->url($domain);
+            //
+            // Strip the Grav root before anything else. Routes never carry it, so doing this first is both what
+            // lets `/subdir/blog` resolve to the `blog` page on a subfolder install, and cheaper than the old
+            // preg_quote()/preg_match() pair that ran on every call.
+            $root = $uri->rootUrl();
+            if ($root !== '' && str_starts_with($input, $root)) {
+                $rest = substr($input, strlen($root));
+                // Only strip on a segment boundary, otherwise `/subdir2/sub` loses its `/subdir` prefix. The old
+                // pattern was unanchored, so `/images/subdir/foo.png` had its middle segment cut out instead.
+                if ($rest === '' || $rest[0] === '/') {
+                    $input = $rest;
+                }
             }
 
-            $root = preg_quote($uri->rootUrl(), '#');
-            $pattern = '#(' . $root . '$|' . $root . '/)#';
-            if (!empty($root) && preg_match($pattern, $input, $matches)) {
-                $input = static::replaceFirstOccurrence($matches[0], '', $input);
+            // Only an absolute path can be a page route: routes are always stored with a leading slash, so the
+            // lookup could never match for a relative path, which is resolved from the Grav root instead. Asset
+            // URLs dominate a render and are mostly relative, so skipping the miss is worth the check.
+            if ($input !== '' && $input[0] === '/') {
+                // Split off any query string or fragment so `/blog?page=2` and `/blog#intro` still resolve to the
+                // `blog` page instead of silently falling through to a raw, language-less path.
+                $split = strcspn($input, '?#');
+                $route = substr($input, 0, $split);
+
+                /** @var Pages $pages */
+                $pages = $grav['pages'];
+
+                $page = $pages->find($route, true);
+                if ($page && $page->routable()) {
+                    return static::pageUrl($page, $domain, $lang) . substr($input, $split);
+                }
             }
 
-            $input = ltrim($input, '/');
+            $prefix = static::languagePrefix($lang);
             $resource = $input;
         }
 
@@ -161,7 +188,70 @@ abstract class Utils
 
         $domain = $domain ?: $grav['config']->get('system.absolute_urls', false);
 
-        return rtrim($uri->rootUrl($domain), '/') . '/' . ($resource ?: '');
+        return rtrim($uri->rootUrl($domain), '/') . $prefix . '/' . ltrim((string)($resource ?: ''), '/');
+    }
+
+    /**
+     * Build the URL for a resolved page, honouring an explicitly requested language.
+     *
+     * `Page::url()` always uses the active language, so it can answer everything except a caller that asked for a
+     * specific one. Note that only the language *prefix* is switched here: the route itself is still the active
+     * language's slug, same as `Pages::url($route, $lang)`.
+     *
+     * @param PageInterface $page
+     * @param bool $domain
+     * @param string|bool|null $lang
+     * @return string
+     */
+    protected static function pageUrl($page, $domain, $lang)
+    {
+        if (!is_string($lang)) {
+            // No specific language asked for: Page::url() already uses the active one.
+            return $page->url($domain);
+        }
+
+        // `external_url` overrides site routing entirely, exactly as Page::url() does. Read it from the header
+        // rather than testing the built URL, which would also match a site URL under `system.absolute_urls`.
+        $header = $page->header();
+        $external = is_object($header) ? ($header->external_url ?? null) : null;
+        if ($external) {
+            return trim((string)$external);
+        }
+
+        $grav = Grav::instance();
+
+        /** @var Pages $pages */
+        $pages = $grav['pages'];
+
+        /** @var Uri $uri */
+        $uri = $grav['uri'];
+
+        $domain = $domain ?: $grav['config']->get('system.absolute_urls', false);
+        $route = $pages->baseRoute($lang) . $page->route();
+
+        return Uri::filterPath($uri->rootUrl($domain) . '/' . trim((string)$route, '/') . $page->urlExtension());
+    }
+
+    /**
+     * Resolve the language prefix to prepend to a non-page path.
+     *
+     * Defaults to no prefix, because the plain-path branch of `url()` is what asset URLs go through and those must
+     * stay language-neutral. Callers linking to a language-sensitive route that isn't a page (a plugin route such
+     * as `/search`, a form action) opt in with `$lang`.
+     *
+     * @param string|bool|null $lang
+     * @return string
+     */
+    protected static function languagePrefix($lang)
+    {
+        if ($lang === null || $lang === false) {
+            return '';
+        }
+
+        /** @var Pages $pages */
+        $pages = Grav::instance()['pages'];
+
+        return $pages->baseRoute(is_string($lang) ? $lang : null);
     }
 
     /**
@@ -196,12 +286,26 @@ abstract class Utils
      */
     public static function startsWith($haystack, $needle, $case_sensitive = true)
     {
+        // Fast path: for valid UTF-8 a byte-prefix match and a character-prefix match
+        // are the same thing, and str_starts_with() avoids mb_strpos() scanning the
+        // whole haystack when the needle occurs later in the string.
+        if ($case_sensitive) {
+            if (is_string($needle)) {
+                return str_starts_with((string) $haystack, $needle);
+            }
+            foreach ((array) $needle as $each_needle) {
+                if (str_starts_with((string) $haystack, (string) $each_needle)) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         $status = false;
 
-        $compare_func = $case_sensitive ? 'mb_strpos' : 'mb_stripos';
-
         foreach ((array)$needle as $each_needle) {
-            $status = $each_needle === '' || $compare_func((string) $haystack, $each_needle) === 0;
+            $status = $each_needle === '' || mb_stripos((string) $haystack, $each_needle) === 0;
             if ($status) {
                 break;
             }
@@ -220,13 +324,25 @@ abstract class Utils
      */
     public static function endsWith($haystack, $needle, $case_sensitive = true)
     {
-        $status = false;
+        // Fast path: byte-suffix and character-suffix matches agree for valid UTF-8.
+        if ($case_sensitive) {
+            if (is_string($needle)) {
+                return str_ends_with((string) $haystack, $needle);
+            }
+            foreach ((array) $needle as $each_needle) {
+                if (str_ends_with((string) $haystack, (string) $each_needle)) {
+                    return true;
+                }
+            }
 
-        $compare_func = $case_sensitive ? 'mb_strrpos' : 'mb_strripos';
+            return false;
+        }
+
+        $status = false;
 
         foreach ((array)$needle as $each_needle) {
             $expectedPosition = mb_strlen((string) $haystack) - mb_strlen($each_needle);
-            $status = $each_needle === '' || $compare_func((string) $haystack, $each_needle, 0) === $expectedPosition;
+            $status = $each_needle === '' || mb_strripos((string) $haystack, $each_needle, 0) === $expectedPosition;
             if ($status) {
                 break;
             }
@@ -245,12 +361,24 @@ abstract class Utils
      */
     public static function contains($haystack, $needle, $case_sensitive = true)
     {
+        // Fast path: substring presence is identical byte-wise and character-wise.
+        if ($case_sensitive) {
+            if (is_string($needle)) {
+                return str_contains((string) $haystack, $needle);
+            }
+            foreach ((array) $needle as $each_needle) {
+                if (str_contains((string) $haystack, (string) $each_needle)) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         $status = false;
 
-        $compare_func = $case_sensitive ? 'mb_strpos' : 'mb_stripos';
-
         foreach ((array)$needle as $each_needle) {
-            $status = $each_needle === '' || $compare_func((string) $haystack, $each_needle) !== false;
+            $status = $each_needle === '' || mb_stripos((string) $haystack, $each_needle) !== false;
             if ($status) {
                 break;
             }
@@ -276,8 +404,8 @@ abstract class Utils
     public static function matchWildcard($wildcard_pattern, $haystack)
     {
         $regex = str_replace(
-            array("\*", "\?"), // wildcard chars
-            array('.*', '.'),   // regexp chars
+            ["\*", "\?"], // wildcard chars
+            ['.*', '.'],   // regexp chars
             preg_quote($wildcard_pattern, '/')
         );
 
@@ -296,10 +424,8 @@ abstract class Utils
     {
         $opening = $brackets[0] ?? '{';
         $closing = $brackets[1] ?? '}';
-        $expression = '/' . preg_quote($opening, '/') . '(.*?)' . preg_quote($closing, '/') . '/';
-        $callback = static function ($match) use ($variables) {
-            return $variables[$match[1]] ?? $match[0];
-        };
+        $expression = '/' . preg_quote((string) $opening, '/') . '(.*?)' . preg_quote((string) $closing, '/') . '/';
+        $callback = static fn($match) => $variables[$match[1]] ?? $match[0];
 
         return preg_replace_callback($expression, $callback, $template);
     }
@@ -468,7 +594,7 @@ abstract class Utils
      */
     public static function arrayDiffMultidimensional($array1, $array2)
     {
-        $result = array();
+        $result = [];
         foreach ($array1 as $key => $value) {
             if (!is_array($array2) || !array_key_exists($key, $array2)) {
                 $result[$key] = $value;
@@ -693,9 +819,20 @@ abstract class Utils
                 header('Content-Disposition: attachment; filename="' . ($options['download_name'] ?? $file_parts['basename']) . '"');
             }
 
+            if ($grav['config']->get('system.cache.enabled')) {
+                $expires = $options['expires'] ?? $grav['config']->get('system.pages.expires');
+                if ($expires > 0) {
+                    $expires_date = gmdate('D, d M Y H:i:s T', time() + $expires);
+                    header('Cache-Control: max-age=' . $expires);
+                    header('Expires: ' . $expires_date);
+                    header('Pragma: cache');
+                }
+                header('Last-Modified: ' . gmdate('D, d M Y H:i:s T', filemtime($file)));
+            }
+
             // multipart-download and download resuming support
             if (isset($_SERVER['HTTP_RANGE'])) {
-                [$a, $range] = explode('=', $_SERVER['HTTP_RANGE'], 2);
+                [$a, $range] = explode('=', (string) $_SERVER['HTTP_RANGE'], 2);
                 [$range] = explode(',', $range, 2);
                 [$range, $range_end] = explode('-', $range);
                 $range = (int)$range;
@@ -705,7 +842,7 @@ abstract class Utils
                     $range_end = (int)$range_end;
                 }
                 $new_length = $range_end - $range + 1;
-                header('HTTP/1.1 206 Partial Content');
+                http_response_code(206);
                 header("Content-Length: {$new_length}");
                 header("Content-Range: bytes {$range}-{$range_end}/{$size}");
             } else {
@@ -714,19 +851,10 @@ abstract class Utils
                 header('Content-Length: ' . $size);
 
                 if ($grav['config']->get('system.cache.enabled')) {
-                    $expires = $options['expires'] ?? $grav['config']->get('system.pages.expires');
-                    if ($expires > 0) {
-                        $expires_date = gmdate('D, d M Y H:i:s T', time() + $expires);
-                        header('Cache-Control: max-age=' . $expires);
-                        header('Expires: ' . $expires_date);
-                        header('Pragma: cache');
-                    }
-                    header('Last-Modified: ' . gmdate('D, d M Y H:i:s T', filemtime($file)));
-
                     // Return 304 Not Modified if the file is already cached in the browser
                     if (isset($_SERVER['HTTP_IF_MODIFIED_SINCE']) &&
-                        strtotime($_SERVER['HTTP_IF_MODIFIED_SINCE']) >= filemtime($file)) {
-                        header('HTTP/1.1 304 Not Modified');
+                        strtotime((string) $_SERVER['HTTP_IF_MODIFIED_SINCE']) >= filemtime($file)) {
+                        http_response_code(304);
                         exit();
                     }
                 }
@@ -773,18 +901,22 @@ abstract class Utils
             return ($uri_extension);
         }
 
-        // Use content negotiation via the `accept:` header
+        // Use content negotiation via the `accept:` header. An empty (but present) or malformed
+        // header makes the negotiator throw, so guard against it and fall back to html.
         $http_accept = $_SERVER['HTTP_ACCEPT'] ?? null;
-        if (is_string($http_accept)) {
-            $negotiator = new Negotiator();
-
+        if (is_string($http_accept) && trim($http_accept) !== '') {
             $supported_types = static::getSupportPageTypes(['html', 'json']);
             $priorities = static::getMimeTypes($supported_types);
 
-            $media_type = $negotiator->getBest($http_accept, $priorities);
-            $mimetype = $media_type instanceof Accept ? $media_type->getValue() : '';
+            try {
+                $negotiator = new Negotiator();
+                $media_type = $negotiator->getBest($http_accept, $priorities);
+                $mimetype = $media_type instanceof Accept ? $media_type->getValue() : '';
 
-            return static::getExtensionByMime($mimetype);
+                return static::getExtensionByMime($mimetype);
+            } catch (\Exception $e) {
+                return 'html';
+            }
         }
 
         return 'html';
@@ -799,12 +931,21 @@ abstract class Utils
      */
     public static function getMimeByExtension($extension, $default = 'application/octet-stream')
     {
-        $extension = strtolower($extension);
+        $extension = strtolower((string)$extension);
+        if ($extension === '') {
+            return $default;
+        }
+
+        // A site's own `media.types.<ext>.mime` wins, so the type served for an output
+        // format such as `rss` or `atom` can be changed without a plugin.
+        $media_types = Grav::instance()['config']->get('media.types');
+        $mimetype = $media_types[$extension]['mime'] ?? null;
+        if (is_string($mimetype) && $mimetype !== '') {
+            return $mimetype;
+        }
 
         // look for some standard types
         switch ($extension) {
-            case null:
-                return $default;
             case 'json':
                 return 'application/json';
             case 'html':
@@ -815,11 +956,11 @@ abstract class Utils
                 return 'application/rss+xml';
             case 'xml':
                 return 'application/xml';
+            case MarkdownOutput::FORMAT:
+                return MarkdownOutput::MIME;
         }
 
-        $media_types = Grav::instance()['config']->get('media.types');
-
-        return $media_types[$extension]['mime'] ?? $default;
+        return $default;
     }
 
     /**
@@ -891,6 +1032,8 @@ abstract class Utils
                 return 'rss';
             case 'application/xml':
                 return 'xml';
+            case MarkdownOutput::MIME:
+                return MarkdownOutput::FORMAT;
         }
 
         $media_types = (array)Grav::instance()['config']->get('media.types');
@@ -991,6 +1134,11 @@ abstract class Utils
             || trim($filename, '. ') !== $filename
             // Filename should not contain path traversal
             || str_replace('..', '', $filename) !== $filename
+            // Filename should not contain HTML metacharacters, so a stored filename
+            // cannot carry an XSS payload if it is later rendered into the DOM
+            // (GHSA-76qg-8r9h-pxxr). `'` is intentionally allowed — it is common in
+            // legitimate names and not needed to break out of an HTML tag.
+            || strtr($filename, '<>"', '___') !== $filename
             // File extension should not be part of configured dangerous extensions
             || in_array($extension, $dangerous_extensions)
         );
@@ -1005,8 +1153,15 @@ abstract class Utils
      * @param int|null $flags
      * @return array|string
      */
-    public static function pathinfo($path, int $flags = null)
+    public static function pathinfo($path, ?int $flags = null)
     {
+        // Fast path: the encode/decode dance is only needed to keep the C-locale
+        // pathinfo() from mangling multibyte characters; plain printable-ASCII
+        // paths behave identically without it.
+        if (!preg_match('/[^\x20-\x7E]/', (string) $path)) {
+            return null === $flags ? pathinfo($path) : pathinfo($path, $flags);
+        }
+
         $path = str_replace(['%2F', '%5C'], ['/', '\\'], rawurlencode($path));
 
         if (null === $flags) {
@@ -1033,6 +1188,11 @@ abstract class Utils
      */
     public static function basename($path, string $suffix = ''): string
     {
+        // Fast path: see pathinfo() - ASCII paths don't need the unicode dance.
+        if (!preg_match('/[^\x20-\x7E]/', $path)) {
+            return basename($path, $suffix);
+        }
+
         return rawurldecode(basename(str_replace(['%2F', '%5C'], '/', rawurlencode($path)), $suffix));
     }
 
@@ -1233,7 +1393,7 @@ abstract class Utils
      */
     public static function arrayFlattenDotNotation($array, $prepend = '')
     {
-        $results = array();
+        $results = [];
         foreach ($array as $key => $value) {
             if (is_array($value)) {
                 $results = array_merge($results, static::arrayFlattenDotNotation($value, $prepend . $key . '.'));
@@ -1266,7 +1426,7 @@ abstract class Utils
     {
         $newArray = [];
         foreach ($array as $key => $value) {
-            $dots = explode($separator, $key);
+            $dots = explode($separator, (string) $key);
             if (count($dots) > 1) {
                 $last = &$newArray[$dots[0]];
                 foreach ($dots as $k => $dot) {
@@ -1318,13 +1478,31 @@ abstract class Utils
     /**
      * Get the timestamp of a date
      *
-     * @param string $date a String expressed in the system.pages.dateformat.default format, with fallback to a
-     *                     strtotime argument
+     * @param string|int|float|DateTimeInterface $date a String expressed in the system.pages.dateformat.default
+     *                     format, with fallback to a strtotime argument. An unquoted YAML date header such as
+     *                     `date: 2022-01-06` never reaches us as a string: the YAML parser reads it as a date and
+     *                     hands over a Unix timestamp, which strtotime() then misreads as a year in the far future.
      * @param string|null $format a date format to use if possible
      * @return int the timestamp
      */
     public static function date2timestamp($date, $format = null)
     {
+        if ($date instanceof DateTimeInterface) {
+            return $date->getTimestamp();
+        }
+
+        if (is_int($date) || is_float($date)) {
+            $date = (string) (int) $date;
+
+            // `date: 20220106` arrives as the number the author typed, and the
+            // parsing below already reads it correctly as a date, so only a
+            // number that cannot be one is treated as a timestamp.
+            $ymd = DateTime::createFromFormat('!Ymd', $date);
+            if ($ymd === false || $ymd->format('Ymd') !== $date) {
+                return (int) $date;
+            }
+        }
+
         $config = Grav::instance()['config'];
         $dateformat = $format ?: $config->get('system.pages.dateformat.default');
 
@@ -1334,7 +1512,7 @@ abstract class Utils
         } else {
             try {
                 $datetime = new DateTime($date);
-            } catch (Exception $e) {
+            } catch (Exception) {
                 $datetime = false;
             }
         }
@@ -1357,7 +1535,7 @@ abstract class Utils
      */
     public static function resolve(array $array, $path, $default = null)
     {
-        user_error(__CLASS__ . '::' . __FUNCTION__ . '() is deprecated since Grav 1.5, use ->getDotNotation() method instead', E_USER_DEPRECATED);
+        user_error(self::class . '::' . __FUNCTION__ . '() is deprecated since Grav 1.5, use ->getDotNotation() method instead', E_USER_DEPRECATED);
 
         return static::getDotNotation($array, $path, $default);
     }
@@ -1405,7 +1583,7 @@ abstract class Utils
             $i--;
         }
 
-        return ($i . '|' . $action . '|' . $username . '|' . $token . '|' . $grav['config']->get('security.salt'));
+        return ($i . '|' . $action . '|' . $username . '|' . $token . '|' . Security::getNonceKey());
     }
 
     /**
@@ -1457,13 +1635,17 @@ abstract class Utils
             $nonce = array_shift($nonce);
         }
 
+        if (!is_string($nonce)) {
+            return false;
+        }
+
         //Nonce generated 0-12 hours ago
-        if ($nonce === self::getNonce($action)) {
+        if (hash_equals(self::getNonce($action), $nonce)) {
             return true;
         }
 
         //Nonce generated 12-24 hours ago
-        return $nonce === self::getNonce($action, true);
+        return hash_equals(self::getNonce($action, true), $nonce);
     }
 
     /**
@@ -1511,12 +1693,10 @@ abstract class Utils
      *
      * @param array $array
      * @param string|int|null $key
-     * @param mixed $value
      * @param bool $merge
-     *
      * @return mixed
      */
-    public static function setDotNotation(&$array, $key, $value, $merge = false)
+    public static function setDotNotation(&$array, $key, mixed $value, $merge = false)
     {
         if (null === $key) {
             return $array = $value;
@@ -1528,7 +1708,7 @@ abstract class Utils
             $key = array_shift($keys);
 
             if (!isset($array[$key]) || !is_array($array[$key])) {
-                $array[$key] = array();
+                $array[$key] = [];
             }
 
             $array =& $array[$key];
@@ -1562,7 +1742,7 @@ abstract class Utils
      */
     public static function isApache()
     {
-        return isset($_SERVER['SERVER_SOFTWARE']) && strpos($_SERVER['SERVER_SOFTWARE'], 'Apache') !== false;
+        return isset($_SERVER['SERVER_SOFTWARE']) && str_contains((string) $_SERVER['SERVER_SOFTWARE'], 'Apache');
     }
 
     /**
@@ -1587,13 +1767,12 @@ abstract class Utils
     /**
      * Sort an array by a key value in the array
      *
-     * @param mixed $array
      * @param string|int $array_key
      * @param int $direction
      * @param int $sort_flags
      * @return array
      */
-    public static function sortArrayByKey($array, $array_key, $direction = SORT_DESC, $sort_flags = SORT_REGULAR)
+    public static function sortArrayByKey(mixed $array, $array_key, $direction = SORT_DESC, $sort_flags = SORT_REGULAR)
     {
         $output = [];
 
@@ -1618,7 +1797,7 @@ abstract class Utils
      * @return string
      * @throws RuntimeException
      */
-    public static function getPagePathFromToken($path, PageInterface $page = null)
+    public static function getPagePathFromToken($path, ?PageInterface $page = null)
     {
         return static::getPathFromToken($path, $page);
     }
@@ -1724,7 +1903,7 @@ abstract class Utils
      */
     protected static function resolveTokenPath(string $path): ?array
     {
-        if (strpos($path, '@') !== false) {
+        if (str_contains($path, '@')) {
             $regex = '/^(@\w+|\w+@|@\w+@)([^:]*)(.*)$/u';
             if (preg_match($regex, $path, $matches)) {
                 return [
@@ -1773,11 +1952,7 @@ abstract class Utils
      */
     public static function convertSize($bytes, $to, $decimal_places = 1)
     {
-        $formulas = array(
-            'K' => number_format($bytes / 1024, $decimal_places),
-            'M' => number_format($bytes / 1048576, $decimal_places),
-            'G' => number_format($bytes / 1073741824, $decimal_places)
-        );
+        $formulas = ['K' => number_format($bytes / 1024, $decimal_places), 'M' => number_format($bytes / 1048576, $decimal_places), 'G' => number_format($bytes / 1073741824, $decimal_places)];
         return $formulas[$to] ?? 0;
     }
 
@@ -1790,7 +1965,7 @@ abstract class Utils
      */
     public static function prettySize($bytes, $precision = 2)
     {
-        $units = array('B', 'KB', 'MB', 'GB', 'TB');
+        $units = ['B', 'KB', 'MB', 'GB', 'TB'];
 
         $bytes = max($bytes, 0);
         $pow = floor(($bytes ? log($bytes) : 0) / log(1024));
@@ -1832,20 +2007,18 @@ abstract class Utils
     {
         $enc_url = preg_replace_callback(
             '%[^:/@?&=#]+%usD',
-            static function ($matches) {
-                return urlencode($matches[0]);
-            },
+            static fn($matches) => urlencode((string) $matches[0]),
             $url
         );
 
-        $parts = parse_url($enc_url);
+        $parts = parse_url((string) $enc_url);
 
         if ($parts === false) {
             $parts = [];
         }
 
         foreach ($parts as $name => $value) {
-            $parts[$name] = urldecode($value);
+            $parts[$name] = urldecode((string) $value);
         }
 
         return $parts;
@@ -1863,7 +2036,7 @@ abstract class Utils
     public static function processMarkdown($string, $block = true, $page = null)
     {
         $grav = Grav::instance();
-        $page = $page ?? $grav['page'] ?? null;
+        $page ??= $grav['page'] ?? null;
         $defaults = [
             'markdown' => $grav['config']->get('system.pages.markdown', []),
             'images' => $grav['config']->get('system.images', [])
@@ -1890,9 +2063,9 @@ abstract class Utils
 
     public static function toAscii(String $string): String
     {
-        return strtr(utf8_decode($string),
-            utf8_decode(
-            'ŠŒŽšœžŸ¥µÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝßàáâãäåæçèéêëìíîïðñòóôõöøùúûüýÿ'),
+        return strtr(mb_convert_encoding($string, 'ISO-8859-1'),
+            mb_convert_encoding(
+            'ŠŒŽšœžŸ¥µÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝßàáâãäåæçèéêëìíîïðñòóôõöøùúûüýÿ', 'ISO-8859-1'),
             'SOZsozYYuAAAAAAACEEEEIIIIDNOOOOOOUUUUYsaaaaaaaceeeeiiiionoooooouuuuyy');
     }
 
@@ -1947,7 +2120,7 @@ abstract class Utils
      * @param array|null $defaults
      * @return array
      */
-    public static function getSupportPageTypes(array $defaults = null)
+    public static function getSupportPageTypes(?array $defaults = null)
     {
         $types = Grav::instance()['config']->get('system.pages.types', $defaults);
         if (!is_array($types)) {
@@ -1959,6 +2132,13 @@ abstract class Utils
 
         // put them back at the front
         $types = array_merge(['html', 'htm'], $types);
+
+        // Markdown output for agents adds `.md` as a page type without anyone
+        // having to edit their `pages.types` list. It goes last so it never
+        // wins an ambiguous `Accept` negotiation.
+        if (MarkdownOutput::enabled() && !in_array(MarkdownOutput::FORMAT, $types, true)) {
+            $types[] = MarkdownOutput::FORMAT;
+        }
 
         return $types;
     }
@@ -2078,11 +2258,11 @@ abstract class Utils
             return false;
         }
 
-        if (is_array($name) || strpos($name, ":") !== false) {
+        if (is_array($name) || str_contains($name, ":")) {
             return true;
         }
 
-        if (strpos($name, "\\") !== false) {
+        if (str_contains($name, "\\")) {
             return true;
         }
 

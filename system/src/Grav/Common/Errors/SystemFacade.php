@@ -3,7 +3,7 @@
 /**
  * @package    Grav\Common\Errors
  *
- * @copyright  Copyright (c) 2015 - 2025 Trilby Media, LLC. All rights reserved.
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
  * @license    MIT License; see LICENSE file for details.
  */
 
@@ -44,6 +44,30 @@ class SystemFacade extends \Whoops\Util\SystemFacade
         }
     }
 
+
+    /**
+     * Whoops ends every output buffer before it writes an error page, calling
+     * endOutputBuffering() until this returns 0. Count only the buffers at the
+     * top of the stack that can be ended, so the loop stops at one PHP will not
+     * let go of, such as a zlib.output_compression handler that has already sent
+     * compressed output. Ending that one raises a notice inside the exception
+     * handler, which PHP reports as a fatal error written into the response
+     * (#4294).
+     *
+     * @return int
+     */
+    public function getOutputBufferLevel()
+    {
+        $removable = 0;
+        foreach (array_reverse(ob_get_status(true)) as $status) {
+            if (!(($status['flags'] ?? 0) & PHP_OUTPUT_HANDLER_REMOVABLE)) {
+                break;
+            }
+            $removable++;
+        }
+
+        return $removable;
+    }
 
     /**
      * @param int $httpCode

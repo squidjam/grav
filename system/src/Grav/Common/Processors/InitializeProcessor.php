@@ -3,12 +3,13 @@
 /**
  * @package    Grav\Common\Processors
  *
- * @copyright  Copyright (c) 2015 - 2025 Trilby Media, LLC. All rights reserved.
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
  * @license    MIT License; see LICENSE file for details.
  */
 
 namespace Grav\Common\Processors;
 
+use Grav\Common\Config\CompiledBase;
 use Grav\Common\Config\Config;
 use Grav\Common\Debugger;
 use Grav\Common\Errors\Errors;
@@ -29,6 +30,7 @@ use Psr\Http\Message\RequestInterface;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\ServerRequestInterface;
 use Psr\Http\Server\RequestHandlerInterface;
+use Throwable;
 use function defined;
 use function in_array;
 
@@ -126,9 +128,7 @@ class InitializeProcessor extends ProcessorBase
 
         // Wrap call to next handler so that debugger can profile it.
         /** @var Response $response */
-        $response = $debugger->profile(static function () use ($handler, $request) {
-            return $handler->handle($request);
-        });
+        $response = $debugger->profile(static fn() => $handler->handle($request));
 
         // Log both request and response and return the response.
         return $debugger->logRequest($request, $response);
@@ -190,31 +190,44 @@ class InitializeProcessor extends ProcessorBase
                 ];
                 $config->set('versions', $versions);
 
-                $file = new YamlFile($filename, new YamlFormatter(['inline' => 4]));
-                $file->save($versions);
+                // Non-fatal: the value is already set in memory for this request
+                // and the write is retried on the next one. A read-only
+                // user/config must not be able to take the site down here, before
+                // the logger, the error handler and the Problems plugin exist to
+                // report it. (#3688, same window as #4260)
+                try {
+                    $file = new YamlFile($filename, new YamlFormatter(['inline' => 4]));
+                    $file->save($versions);
+                } catch (Throwable $e) {
+                    CompiledBase::logCacheWriteFailure($filename, $e->getMessage());
+                }
             }
         }
 
-        // Override configuration using the environment.
+        // Override configuration using the environment. The gate has to read
+        // exactly what the loop below reads: a SAPI that populates only
+        // $_SERVER (Apache SetEnv, nginx fastcgi_param) would otherwise skip
+        // the whole feature with nothing logged, and an empty value must fall
+        // through rather than shadow a working getenv(). (#4279)
         $prefix = 'GRAV_CONFIG';
-        $env = getenv($prefix);
-        if ($env) {
+        $vars = $_ENV + $_SERVER;
+        if (!empty($vars[$prefix]) || getenv($prefix)) {
             $cPrefix = $prefix . '__';
             $aPrefix = $prefix . '_ALIAS__';
             $cLen = strlen($cPrefix);
             $aLen = strlen($aPrefix);
 
             $keys = $aliases = [];
-            $env = $_ENV + $_SERVER;
+            $env = $vars;
             foreach ($env as $key => $value) {
-                if (!str_starts_with($key, $prefix)) {
+                if (!str_starts_with((string) $key, $prefix)) {
                     continue;
                 }
-                if (str_starts_with($key, $cPrefix)) {
-                    $key = str_replace('__', '.', substr($key, $cLen));
+                if (str_starts_with((string) $key, $cPrefix)) {
+                    $key = str_replace('__', '.', substr((string) $key, $cLen));
                     $keys[$key] = $value;
-                } elseif (str_starts_with($key, $aPrefix)) {
-                    $key = substr($key, $aLen);
+                } elseif (str_starts_with((string) $key, $aPrefix)) {
+                    $key = substr((string) $key, $aLen);
                     $aliases[$key] = $value;
                 }
             }
@@ -223,6 +236,7 @@ class InitializeProcessor extends ProcessorBase
                 foreach ($aliases as $alias => $real) {
                     $key = str_replace($alias, $real, $key);
                 }
+                $value = static::castEnvironmentValue($value);
                 $list[$key] = $value;
                 $config->set($key, $value);
             }
@@ -235,10 +249,17 @@ class InitializeProcessor extends ProcessorBase
 
     /**
      * @param Config $config
-     * @return Logger
+     * @return Logger|null
      */
-    protected function initializeLogger(Config $config): Logger
+    protected function initializeLogger(Config $config): ?Logger
     {
+        // The default file handler needs no setup here, so the logger service can stay
+        // lazy and only gets built when something actually logs. Only the syslog
+        // handler requires replacing the default handler up front.
+        if ($config->get('system.log.handler', 'file') !== 'syslog') {
+            return null;
+        }
+
         $this->startTimer('_init_logger', 'Logger');
 
         $grav = $this->container;
@@ -246,18 +267,15 @@ class InitializeProcessor extends ProcessorBase
         // Initialize Logging
         /** @var Logger $log */
         $log = $grav['log'];
+        $log->popHandler();
 
-        if ($config->get('system.log.handler', 'file') === 'syslog') {
-            $log->popHandler();
+        $facility = $config->get('system.log.syslog.facility', 'local6');
+        $tag = $config->get('system.log.syslog.tag', 'grav');
+        $logHandler = new SyslogHandler($tag, $facility);
+        $formatter = new LineFormatter("%channel%.%level_name%: %message% %extra%");
+        $logHandler->setFormatter($formatter);
 
-            $facility = $config->get('system.log.syslog.facility', 'local6');
-            $tag = $config->get('system.log.syslog.tag', 'grav');
-            $logHandler = new SyslogHandler($tag, $facility);
-            $formatter = new LineFormatter("%channel%.%level_name%: %message% %extra%");
-            $logHandler->setFormatter($formatter);
-
-            $log->pushHandler($logHandler);
-        }
+        $log->pushHandler($logHandler);
 
         $this->stopTimer('_init_logger');
 
@@ -341,10 +359,6 @@ class InitializeProcessor extends ProcessorBase
 
         // Use output buffering to prevent headers from being sent too early.
         ob_start();
-        if ($config->get('system.cache.gzip') && !@ob_start('ob_gzhandler')) {
-            // Enable zip/deflate with a fallback in case of if browser does not support compressing.
-            ob_start();
-        }
 
         $this->stopTimer('_init_ob');
     }
@@ -415,7 +429,7 @@ class InitializeProcessor extends ProcessorBase
         $this->stopTimer('_init_uri');
     }
 
-    protected function handleRedirectRequest(RequestInterface $request, int $code = null): ?ResponseInterface
+    protected function handleRedirectRequest(RequestInterface $request, ?int $code = null): ?ResponseInterface
     {
         if (!in_array($request->getMethod(), ['GET', 'HEAD'])) {
             return null;
@@ -426,12 +440,79 @@ class InitializeProcessor extends ProcessorBase
         $path = $uri->getPath() ?: '/';
         $root = $this->container['uri']->rootUrl();
 
+        // The raw PSR-7 path is the path PHP was reached at, which is not necessarily
+        // the URL the visitor typed. With `system.custom_base_url` the public base can
+        // differ from the physical one, and behind a proxy that strips the base before
+        // forwarding, the request carries no base at all -- so building the redirect
+        // target from the raw path drops it and sends visitors outside the site (#3822).
+        //
+        // Uri has already resolved this: `init()` maps the physical base onto the public
+        // one, so `uri(true)` is the public path. Prefer it, and only prepend the base
+        // when it genuinely is not there -- prepending onto an already-remapped path
+        // would double it up.
+        if ($root !== '' && $root !== '/' && str_starts_with($root, '/')) {
+            $publicPath = explode('?', $this->container['uri']->uri(true), 2)[0] ?: '/';
+
+            if (!static::pathHasBase($publicPath, $root)) {
+                $publicPath = rtrim($root, '/') . $publicPath;
+            }
+
+            $path = $publicPath;
+            $uri = $uri->withPath($path);
+        }
+
         if ($path !== $root && $path !== $root . '/' && Utils::endsWith($path, '/')) {
             // Use permanent redirect for SEO reasons.
             return $this->container->getRedirectResponse((string)$uri->withPath(rtrim($path, '/')), $code);
         }
 
         return null;
+    }
+
+    /**
+     * Does `$path` lie at, or under, the base path `$base`?
+     *
+     * Compares whole path segments rather than raw text. A plain prefix test would
+     * report `/subscribe` as already being under a base of `/sub`, which silently
+     * skips restoring the base for every page whose first segment merely starts with
+     * the same letters -- the original bug, still present but only on those routes.
+     *
+     * @param string $path
+     * @param string $base
+     * @return bool
+     */
+    protected static function pathHasBase(string $path, string $base): bool
+    {
+        $base = rtrim($base, '/');
+
+        return $path === $base || str_starts_with($path, $base . '/');
+    }
+
+    /**
+     * Coerce a `GRAV_CONFIG__*` environment override to the type it plainly means.
+     *
+     * Environment variables are always strings, so `GRAV_CONFIG__system__cache__enabled=false`
+     * would otherwise reach the config as the string `"false"` -- and the `(bool)` casts
+     * used throughout core (e.g. `Cache::init()`) treat any non-empty, non-`"0"` string
+     * as true, silently doing the opposite of what was asked. Only the two boolean
+     * literals are coerced, case-insensitively; numbers and every other string are
+     * passed through unchanged, matching the previous behaviour.
+     *
+     * @param mixed $value
+     * @return mixed
+     */
+    protected static function castEnvironmentValue(mixed $value): mixed
+    {
+        if (is_string($value)) {
+            if (strcasecmp($value, 'true') === 0) {
+                return true;
+            }
+            if (strcasecmp($value, 'false') === 0) {
+                return false;
+            }
+        }
+
+        return $value;
     }
 
     /**
@@ -448,7 +529,7 @@ class InitializeProcessor extends ProcessorBase
 
             try {
                 $session->init();
-            } catch (SessionException $e) {
+            } catch (SessionException) {
                 $session->init();
                 $message = 'Session corruption detected, restarting session...';
                 $this->addMessage($message);
